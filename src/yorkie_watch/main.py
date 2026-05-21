@@ -32,15 +32,13 @@ def run_once() -> int:
 
 def run_test_openclaw() -> int:
     client = OpenClawClient.from_env()
-    success = client.send_event(
-        {
-            "event_type": "yorkie_watch_test",
-            "message": "Test alert from Hailo Yorkie Watch",
-            "confidence": 0.0,
-        }
-    )
+    if client.notify_mode == "disabled":
+        print("OpenClaw notifications are disabled; no test event sent.")
+        return 0
+
+    success = client.send_message("Test alert from Hailo Yorkie Watch")
     if success:
-        print("OpenClaw test event sent successfully.")
+        print(f"OpenClaw test event sent successfully via {client.notify_mode}.")
         return 0
 
     print("OpenClaw test event failed. Check logs and OpenClaw connectivity.")
@@ -56,7 +54,7 @@ def main() -> int:
             return run_once()
         if args.test_openclaw:
             return run_test_openclaw()
-    except (ConfigError, HomeAssistantError) as exc:
+    except (ConfigError, HomeAssistantError, ValueError) as exc:
         LOGGER.error("%s", exc)
         return 1
 

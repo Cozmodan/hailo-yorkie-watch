@@ -10,11 +10,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from yorkie_watch.config import ConfigError  # noqa: E402
 from yorkie_watch.openclaw_client import OpenClawClient  # noqa: E402
 
-TEST_PAYLOAD = {
-    "event_type": "yorkie_watch_test",
-    "message": "Test alert from Hailo Yorkie Watch",
-    "confidence": 0.0,
-}
+TEST_MESSAGE = "Test alert from Hailo Yorkie Watch"
 
 
 def main() -> int:
@@ -22,15 +18,19 @@ def main() -> int:
 
     try:
         client = OpenClawClient.from_env()
-    except ConfigError as exc:
+    except (ConfigError, ValueError) as exc:
         print(f"OpenClaw test failed: {exc}")
         return 1
 
-    if client.send_event(TEST_PAYLOAD):
-        print("OpenClaw test event sent successfully.")
+    if client.notify_mode == "disabled":
+        print("OpenClaw notification test skipped because OPENCLAW_NOTIFY_MODE=disabled.")
         return 0
 
-    print("OpenClaw test event failed. Check logs and OpenClaw connectivity.")
+    if client.send_message(TEST_MESSAGE):
+        print(f"OpenClaw test message sent successfully via {client.notify_mode}.")
+        return 0
+
+    print("OpenClaw test message failed. Check logs and OpenClaw connectivity.")
     return 1
 
 

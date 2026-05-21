@@ -40,17 +40,33 @@ Copy-Item .env.example .env
 Then edit `.env` with your local values:
 
 ```dotenv
-HOME_ASSISTANT_URL=http://homeassistant.local:8123
-HOME_ASSISTANT_TOKEN=your-home-assistant-long-lived-access-token
-HOME_ASSISTANT_CAMERA_ENTITY=camera.your_camera
+HOME_ASSISTANT_URL=<home-assistant-url>
+HOME_ASSISTANT_TOKEN=<home-assistant-token>
+HOME_ASSISTANT_CAMERA_ENTITY=<home-assistant-camera-entity>
 
-OPENCLAW_URL=http://openclaw.local:8000
-OPENCLAW_TOKEN=your-openclaw-token
-OPENCLAW_WHATSAPP_TARGET=your-whatsapp-target
+OPENCLAW_NOTIFY_MODE=ssh
+OPENCLAW_WHATSAPP_TARGET=<whatsapp-target>
+
+OPENCLAW_URL=<openclaw-http-url>
+OPENCLAW_TOKEN=<openclaw-http-token>
 OPENCLAW_EVENT_ENDPOINT=/api/events/yorkie-watch
+
+OPENCLAW_SSH_HOST=<openclaw-ssh-host>
+OPENCLAW_SSH_USER=<openclaw-ssh-user>
+OPENCLAW_SSH_PORT=22
+OPENCLAW_BINARY=openclaw
+OPENCLAW_WHATSAPP_ACCOUNT=business
 ```
 
-`OPENCLAW_EVENT_ENDPOINT` is optional and defaults to `/api/events/yorkie-watch`.
+Do not put real values in committed files. Keep real URLs, hostnames, tokens, camera entity names, and WhatsApp targets in your local `.env` only.
+
+`OPENCLAW_NOTIFY_MODE` supports:
+
+- `http`: send the existing JSON event to `OPENCLAW_URL` using `OPENCLAW_TOKEN`.
+- `ssh`: run OpenClaw on the remote machine over SSH.
+- `disabled`: skip notification sends without contacting OpenClaw.
+
+`OPENCLAW_NOTIFY_MODE` defaults to `http` if unset. `OPENCLAW_EVENT_ENDPOINT` is optional and defaults to `/api/events/yorkie-watch`. `OPENCLAW_SSH_PORT`, `OPENCLAW_BINARY`, and `OPENCLAW_WHATSAPP_ACCOUNT` default to `22`, `openclaw`, and `business`.
 
 ## Home Assistant snapshot test
 
@@ -64,13 +80,13 @@ The script prints the saved path and file size when successful.
 
 ## OpenClaw notification test
 
-Send a test JSON event to OpenClaw:
+Send a test WhatsApp notification through the configured OpenClaw path:
 
 ```powershell
 python scripts/test_openclaw_notify.py
 ```
 
-The test payload is:
+For HTTP mode, the test payload is:
 
 ```json
 {
@@ -82,6 +98,12 @@ The test payload is:
 
 The configured `OPENCLAW_WHATSAPP_TARGET` is added to the outgoing JSON as `whatsapp_target`.
 
+For SSH mode, the script invokes OpenClaw with `subprocess.run` using argv and no local shell:
+
+```text
+ssh -p <port> <ssh-user>@<ssh-host> <openclaw-binary> message send --channel whatsapp --account <account> --target <whatsapp-target> --message <message>
+```
+
 ## Command-line usage
 
 Fetch one Home Assistant snapshot and save it under `data/snapshots/`:
@@ -90,7 +112,7 @@ Fetch one Home Assistant snapshot and save it under `data/snapshots/`:
 python -m yorkie_watch.main --once
 ```
 
-Send one OpenClaw test event:
+Send one OpenClaw test notification:
 
 ```powershell
 python -m yorkie_watch.main --test-openclaw
