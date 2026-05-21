@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -40,10 +41,16 @@ class HomeAssistantClient:
         entity = quote(self.camera_entity, safe="")
         return f"{self.base_url}/api/camera_proxy/{entity}"
 
-    def fetch_snapshot(self) -> bytes:
-        """Fetch one camera image from Home Assistant and return the raw bytes."""
+    def _camera_proxy_url_with_cache_buster(self) -> str:
+        """Build a camera proxy URL with a timestamp query parameter."""
+        unix_ms = int(time.time() * 1000)
+        return f"{self.camera_proxy_url}?ts={unix_ms}"
+
+    def _fetch_snapshot_once(self) -> bytes:
+        """Fetch one camera image from Home Assistant without retrying."""
+        snapshot_url = self._camera_proxy_url_with_cache_buster()
         request = Request(
-            self.camera_proxy_url,
+            snapshot_url,
             headers={
                 "Authorization": f"Bearer {self.token}",
                 "Accept": "image/*",
@@ -56,30 +63,47 @@ class HomeAssistantClient:
                 image_bytes = response.read()
         except HTTPError as exc:
             message = f"Home Assistant snapshot request failed with HTTP {exc.code}: {exc.reason}"
-            LOGGER.error(message)
+            if exc.code == 500:
+                message = f"{message}. The camera backend may be temporarily unavailable."
             raise HomeAssistantError(message) from exc
         except URLError as exc:
             message = f"Could not reach Home Assistant at {self.base_url}: {exc.reason}"
-            LOGGER.error(message)
             raise HomeAssistantError(message) from exc
         except TimeoutError as exc:
             message = f"Timed out fetching Home Assistant snapshot from {self.base_url}"
-            LOGGER.error(message)
             raise HomeAssistantError(message) from exc
 
         if not image_bytes:
             message = "Home Assistant returned an empty snapshot response."
-            LOGGER.error(message)
             raise HomeAssistantError(message)
 
-        LOGGER.info("Fetched Home Assistant snapshot from %s (%d bytes).", self.camera_proxy_url, len(image_bytes))
+        LOGGER.info("Fetched Home Assistant snapshot from %s (%d bytes).", snapshot_url, len(image_bytes))
         return image_bytes
 
-    def save_snapshot(self, path: str | Path) -> Path:
+    def fetch_snapshot(self, *, attempts: int = 3, delay_seconds: float = 2.0) -> bytes:
+        """Fetch one camera image from Home Assistant and return the raw bytes, retrying transient failures."""
+        if attempts < 1:
+            raise ValueError("attempts must be at least 1")
+        if delay_seconds < 0:
+            raise ValueError("delay_seconds must not be negative")
+
+        for attempt in range(1, attempts + 1):
+            try:
+                return self._fetch_snapshot_once()
+            except HomeAssistantError as exc:
+                LOGGER.warning("Home Assistant snapshot attempt %d/%d failed: %s", attempt, attempts, exc)
+                if attempt == attempts:
+                    LOGGER.error("Home Assistant snapshot failed after %d attempt(s).", attempts)
+                    raise
+                time.sleep(delay_seconds)
+
+        raise HomeAssistantError("Home Assistant snapshot failed without a captured error.")
+
+    def save_snapshot(self, path: str | Path, *, attempts: int = 3, delay_seconds: float = 2.0) -> Path:
         """Fetch one camera image and save it to `path`."""
         output_path = Path(path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        image_bytes = self.fetch_snapshot()
+        image_bytes = self.fetch_snapshot(attempts=attempts, delay_seconds=delay_seconds)
         output_path.write_bytes(image_bytes)
         LOGGER.info("Saved Home Assistant snapshot to %s (%d bytes).", output_path, len(image_bytes))
         return output_path

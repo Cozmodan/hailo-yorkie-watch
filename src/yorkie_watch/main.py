@@ -25,7 +25,7 @@ def run_once() -> int:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_path = SNAPSHOT_DIR / f"snapshot_{timestamp}.jpg"
     client = HomeAssistantClient.from_env()
-    saved_path = client.save_snapshot(output_path)
+    saved_path = client.save_snapshot(output_path, attempts=3, delay_seconds=2.0)
     print(f"Saved snapshot to {saved_path} ({saved_path.stat().st_size} bytes)")
     return 0
 

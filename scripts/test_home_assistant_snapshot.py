@@ -18,7 +18,7 @@ def main() -> int:
 
     try:
         client = HomeAssistantClient.from_env()
-        saved_path = client.save_snapshot(SNAPSHOT_PATH)
+        saved_path = client.save_snapshot(SNAPSHOT_PATH, attempts=3, delay_seconds=2.0)
     except (ConfigError, HomeAssistantError) as exc:
         print(f"Failed to save Home Assistant snapshot: {exc}")
         return 1
