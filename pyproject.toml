@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hailo-yorkie-watch"
+version = "0.1.0"
+description = "Plumbing for Home Assistant snapshots and OpenClaw notifications."
+requires-python = ">=3.10"
+dependencies = [
+    "python-dotenv>=1.0.0",
+]
+
+[project.scripts]
+yorkie-watch = "yorkie_watch.main:main"

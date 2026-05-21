@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Runtime snapshots and real camera images
+data/snapshots/*
+*.jpg
+*.jpeg
+*.png
+*.webp
+
+# Local AI/IDE agent state
+.junie/
