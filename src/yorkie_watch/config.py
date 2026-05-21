@@ -47,6 +47,23 @@ class DetectorConfig:
     command_template: str
 
 
+@dataclass(frozen=True)
+class ScanConfig:
+    """Runtime settings for multi-stage image scanning."""
+
+    night_mode: str
+    scan_tiles: str
+    enable_crop_scan: bool
+    enable_person_roi_scan: bool
+    full_frame_dog_confidence: float
+    crop_dog_confidence: float
+    person_confidence: float
+    confirm_frames: int
+    confirm_interval_seconds: float
+    max_crops_per_image: int
+    save_debug_crops: bool
+
+
 def load_environment(env_path: str | Path | None = None) -> None:
     """Load environment variables from `.env` without overriding existing values."""
     loaded = load_dotenv(dotenv_path=env_path, override=False)
@@ -173,15 +190,37 @@ def load_openclaw_config() -> OpenClawConfig:
 def load_detector_config() -> DetectorConfig:
     """Load object detector settings from `.env` / process environment."""
     load_environment()
+    full_frame_dog_confidence = get_float_env(
+        "YORKIE_FULL_FRAME_DOG_CONFIDENCE",
+        get_float_env("YORKIE_DOG_CONFIDENCE", 0.35),
+    )
     return DetectorConfig(
         enabled=get_bool_env("YORKIE_DETECTOR_ENABLED", False),
         backend=(get_env("YORKIE_DETECTOR_BACKEND", "hailo_apps") or "hailo_apps").lower(),
         hef_path=get_env("YORKIE_HAILO_HEF", "/usr/share/hailo-models/yolov8m_h10.hef")
         or "/usr/share/hailo-models/yolov8m_h10.hef",
         hailo_apps_root=get_env("YORKIE_HAILO_APPS_ROOT", "/home/pi/hailo-apps") or "/home/pi/hailo-apps",
-        confidence_threshold=get_float_env("YORKIE_DOG_CONFIDENCE", 0.35),
-        target_classes=get_csv_env("YORKIE_TARGET_CLASSES", "dog"),
+        confidence_threshold=full_frame_dog_confidence,
+        target_classes=get_csv_env("YORKIE_TARGET_CLASSES", "dog,person"),
         timeout_seconds=get_float_env("YORKIE_DETECTOR_TIMEOUT", 60.0),
         python_executable=get_env("YORKIE_HAILO_PYTHON", "python3") or "python3",
         command_template=get_env("YORKIE_HAILO_DETECT_COMMAND"),
+    )
+
+
+def load_scan_config() -> ScanConfig:
+    """Load multi-stage scanner settings from `.env` / process environment."""
+    load_environment()
+    return ScanConfig(
+        night_mode=(get_env("YORKIE_NIGHT_MODE", "auto") or "auto").lower(),
+        scan_tiles=(get_env("YORKIE_SCAN_TILES", "2x2") or "2x2").lower(),
+        enable_crop_scan=get_bool_env("YORKIE_ENABLE_CROP_SCAN", True),
+        enable_person_roi_scan=get_bool_env("YORKIE_ENABLE_PERSON_ROI_SCAN", True),
+        full_frame_dog_confidence=get_float_env("YORKIE_FULL_FRAME_DOG_CONFIDENCE", 0.35),
+        crop_dog_confidence=get_float_env("YORKIE_CROP_DOG_CONFIDENCE", 0.20),
+        person_confidence=get_float_env("YORKIE_PERSON_CONFIDENCE", 0.35),
+        confirm_frames=max(1, get_int_env("YORKIE_CONFIRM_FRAMES", 2)),
+        confirm_interval_seconds=max(0.0, get_float_env("YORKIE_CONFIRM_INTERVAL_SECONDS", 1.0)),
+        max_crops_per_image=max(0, get_int_env("YORKIE_MAX_CROPS_PER_IMAGE", 8)),
+        save_debug_crops=get_bool_env("YORKIE_SAVE_DEBUG_CROPS", True),
     )

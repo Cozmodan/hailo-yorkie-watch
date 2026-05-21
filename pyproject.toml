@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Plumbing for Home Assistant snapshots and OpenClaw notifications."
 requires-python = ">=3.10"
 dependencies = [
+    "Pillow>=10.0.0",
     "python-dotenv>=1.0.0",
 ]
 

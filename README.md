@@ -66,9 +66,21 @@ YORKIE_HAILO_HEF=/usr/share/hailo-models/yolov8m_h10.hef
 YORKIE_HAILO_APPS_ROOT=<hailo-apps-root>
 YORKIE_HAILO_PYTHON=python3
 YORKIE_DOG_CONFIDENCE=0.35
-YORKIE_TARGET_CLASSES=dog
+YORKIE_FULL_FRAME_DOG_CONFIDENCE=0.35
+YORKIE_CROP_DOG_CONFIDENCE=0.20
+YORKIE_PERSON_CONFIDENCE=0.35
+YORKIE_TARGET_CLASSES=dog,person
 YORKIE_DETECTOR_TIMEOUT=60
 YORKIE_HAILO_DETECT_COMMAND=
+
+YORKIE_NIGHT_MODE=auto
+YORKIE_SCAN_TILES=2x2
+YORKIE_ENABLE_CROP_SCAN=1
+YORKIE_ENABLE_PERSON_ROI_SCAN=1
+YORKIE_CONFIRM_FRAMES=2
+YORKIE_CONFIRM_INTERVAL_SECONDS=1.0
+YORKIE_MAX_CROPS_PER_IMAGE=8
+YORKIE_SAVE_DEBUG_CROPS=1
 ```
 
 Do not put real values in committed files. Keep real URLs, hostnames, tokens, camera entity names, and WhatsApp targets in your local `.env` only.
@@ -83,9 +95,27 @@ Do not put real values in committed files. Keep real URLs, hostnames, tokens, ca
 
 Snapshot attachments over SSH are opt-in because OpenClaw media CLI syntax must be verified on the Nano first. When `OPENCLAW_SSH_MEDIA_COMMAND_TEMPLATE` is set, the Pi copies the snapshot to `OPENCLAW_SSH_MEDIA_REMOTE_DIR` with `scp`, then runs the configured OpenClaw media command on the Nano. Available template placeholders are `{binary}`, `{channel}`, `{account}`, `{target}`, `{message}`, and `{media_path}`. Leave the template empty until the media command syntax is confirmed.
 
-`YORKIE_DETECTOR_ENABLED` defaults to `0`, so `--once` still only saves a Home Assistant snapshot unless you opt in to detection. The default detector backend is `hailo_apps`, using `/usr/share/hailo-models/yolov8m_h10.hef`, `dog` as the target class, and `0.35` as the minimum confidence.
+`YORKIE_DETECTOR_ENABLED` defaults to `0`, so `--once` still only saves a Home Assistant snapshot unless you opt in to detection. The default detector backend is `hailo_apps`, using `/usr/share/hailo-models/yolov8m_h10.hef`, `dog,person` as requested detector classes, `0.35` as the full-frame dog confidence, and `0.20` as the crop/zoom dog confidence.
 
 `YORKIE_HAILO_APPS_ROOT` should point to the installed `hailo-apps` checkout on the Pi. `YORKIE_HAILO_PYTHON` defaults to `python3` so the detector subprocess can use system Hailo packages outside this project virtual environment. `YORKIE_HAILO_DETECT_COMMAND` is optional; leave it empty to use the repo wrapper, or set it to a JSON-emitting command template with `{image}`, `{hef}`, `{hailo_apps_root}`, `{threshold}`, and `{classes}` placeholders after verifying a custom Hailo command.
+
+## Multi-stage night scanner
+
+The scanner keeps the existing full-frame dog alert behavior, then runs digital crop scans only when the full-frame dog threshold is not met. It does not move the camera or call Home Assistant PTZ services.
+
+Current scanner passes are:
+
+- Full-frame detection for `dog` and generic `person` classes.
+- Center zoom crop.
+- Lower-half crop for road/ground areas.
+- `2x2` tiles by default, with `3x3` available by setting `YORKIE_SCAN_TILES=3x3`.
+- Person-expanded ROI crops when generic `person` detections meet `YORKIE_PERSON_CONFIDENCE`.
+
+Person detections are only used as region-of-interest cues. The project does not do face recognition or identify people.
+
+Crop detections are mapped back to original snapshot coordinates and include a `source` value in JSON such as `full_frame`, `tile`, `lower_half`, `person_roi`, or `center_zoom`. When `YORKIE_SAVE_DEBUG_CROPS=1`, crop images are saved under `data/debug_crops/`; repository image ignore rules keep these real camera crops out of Git.
+
+`YORKIE_CONFIRM_FRAMES` controls optional multi-frame confirmation for `--once` alerts. The default `2` means the app can take two snapshots separated by `YORKIE_CONFIRM_INTERVAL_SECONDS` and alert only when dog detection appears in both frames. Set `YORKIE_CONFIRM_FRAMES=1` for faster manual single-frame testing.
 
 ## Home Assistant snapshot test
 

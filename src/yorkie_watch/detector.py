@@ -13,6 +13,7 @@ from typing import Any
 from .config import DetectorConfig, load_detector_config
 
 LOGGER = logging.getLogger(__name__)
+COCO_PERSON_CLASS_ID = 0
 COCO_DOG_CLASS_ID = 16
 DEFAULT_BACKEND = "hailo_apps"
 
@@ -29,6 +30,9 @@ class Detection:
     confidence: float
     class_id: int | None = None
     bbox: tuple[float, float, float, float] | None = None
+    source: str = "full_frame"
+    crop_id: str = ""
+    crop_path: str = ""
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any]) -> "Detection":
@@ -41,6 +45,9 @@ class Detection:
             class_id=int(class_id) if class_id is not None and str(class_id).strip() else None,
             confidence=float(confidence),
             bbox=tuple(float(value) for value in bbox[:4]) if isinstance(bbox, list | tuple) and len(bbox) >= 4 else None,
+            source=str(data.get("source") or "full_frame"),
+            crop_id=str(data.get("crop_id") or ""),
+            crop_path=str(data.get("crop_path") or ""),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -49,7 +56,12 @@ class Detection:
             "class_id": self.class_id,
             "confidence": self.confidence,
             "bbox": list(self.bbox) if self.bbox is not None else None,
+            "source": self.source,
         }
+        if self.crop_id:
+            data["crop_id"] = self.crop_id
+        if self.crop_path:
+            data["crop_path"] = self.crop_path
         return data
 
 
@@ -175,7 +187,7 @@ class HailoAppsDetector:
             payload,
             image_path=image,
             backend=str(payload.get("backend") or self.backend),
-            target_classes=self.config.target_classes,
+            target_classes=("dog",),
             confidence_threshold=self.config.confidence_threshold,
         )
 
@@ -289,6 +301,8 @@ def _detection_matches(detection: Detection, target_classes: tuple[str, ...], co
 
 
 def _class_name_from_id(class_id: int | None) -> str:
+    if class_id == COCO_PERSON_CLASS_ID:
+        return "person"
     if class_id == COCO_DOG_CLASS_ID:
         return "dog"
     return f"class {class_id}" if class_id is not None else "unknown"

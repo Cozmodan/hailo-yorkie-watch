@@ -5,6 +5,7 @@ import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
@@ -63,7 +64,7 @@ class DetectionDecisionTests(unittest.TestCase):
         )
         notifier = FakeNotifier()
 
-        with redirect_stdout(StringIO()):
+        with redirect_stdout(StringIO()), patch.dict("os.environ", {"YORKIE_ENABLE_CROP_SCAN": "0"}):
             sent = run_detection_and_maybe_notify(
                 Path("snapshot.jpg"),
                 detector=FakeDetector(result),
@@ -86,7 +87,7 @@ class DetectionDecisionTests(unittest.TestCase):
         )
         notifier = FakeNotifier()
 
-        with redirect_stdout(StringIO()):
+        with redirect_stdout(StringIO()), patch.dict("os.environ", {"YORKIE_ENABLE_CROP_SCAN": "0"}):
             sent = run_detection_and_maybe_notify(
                 Path("snapshot.jpg"),
                 detector=FakeDetector(result),
@@ -99,7 +100,11 @@ class DetectionDecisionTests(unittest.TestCase):
     def test_detector_failure_does_not_send_notification(self) -> None:
         notifier = FakeNotifier()
 
-        with redirect_stdout(StringIO()), self.assertLogs("yorkie_watch.main", level="ERROR"):
+        with (
+            redirect_stdout(StringIO()),
+            patch.dict("os.environ", {"YORKIE_ENABLE_CROP_SCAN": "0"}),
+            self.assertLogs("yorkie_watch.main", level="ERROR"),
+        ):
             sent = run_detection_and_maybe_notify(
                 Path("snapshot.jpg"),
                 detector=FakeDetector(error="mock detector failed"),

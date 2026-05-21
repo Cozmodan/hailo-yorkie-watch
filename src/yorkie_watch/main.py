@@ -5,10 +5,11 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
-from .config import ConfigError, load_detector_config
+from .config import ConfigError, load_detector_config, load_scan_config
 from .detector import COCO_DOG_CLASS_ID, DetectionResult, DetectorError, create_detector, print_result
 from .ha_client import HomeAssistantClient, HomeAssistantError
 from .openclaw_client import OpenClawClient
+from .scanner import best_crop_path, best_dog_confidence, scan_confirmed_snapshots, scan_image, scanner_summary
 
 LOGGER = logging.getLogger(__name__)
 SNAPSHOT_DIR = Path("data") / "snapshots"
@@ -36,7 +37,23 @@ def run_once() -> int:
     print(f"Saved snapshot to {saved_path} ({saved_path.stat().st_size} bytes)")
     detector_config = load_detector_config()
     if detector_config.enabled:
-        run_detection_and_maybe_notify(saved_path, detector=create_detector(detector_config))
+        scan_config = load_scan_config()
+        detector = create_detector(detector_config)
+        if scan_config.confirm_frames > 1:
+            result = scan_confirmed_snapshots(
+                capture_snapshot=lambda frame_index: saved_path
+                if frame_index == 0
+                else client.save_snapshot(
+                    SNAPSHOT_DIR / f"snapshot_{timestamp}_frame{frame_index + 1}.jpg",
+                    attempts=3,
+                    delay_seconds=2.0,
+                ),
+                detector=detector,
+                config=scan_config,
+            )
+            _notify_detection_result(saved_path, result)
+        else:
+            run_detection_and_maybe_notify(saved_path, detector=detector)
     return 0
 
 
@@ -75,15 +92,17 @@ def run_what_see() -> int:
 
     detector = create_detector(load_detector_config())
     try:
-        result = detector.detect(saved_path)
+        frame_scan = scan_image(saved_path, detector=detector, config=load_scan_config())
+        result = frame_scan.result
     except DetectorError as exc:
         LOGGER.error("Detector failed for %s: %s", saved_path, exc)
         message = f"What I see: detector failed: {exc}"
         confidence = 0.0
     else:
         print_result(result)
-        message = f"What I see: {_detection_summary(result)}"
-        confidence = _matched_confidence(result)
+        crop_path = frame_scan.best_crop_path or best_crop_path(result)
+        message = scanner_summary(result, best_crop_path=crop_path)
+        confidence = best_dog_confidence(result)
 
     notifier = OpenClawClient.from_env()
     if notifier.send_message(
@@ -107,12 +126,27 @@ def run_detection_and_maybe_notify(
 ) -> bool:
     """Run detection and send a notification only when the alert condition matches."""
     try:
-        result = detector.detect(image_path)  # type: ignore[attr-defined]
+        result = scan_image(image_path, detector=detector, config=load_scan_config()).result
     except DetectorError as exc:
         LOGGER.error("Detector failed for %s: %s", image_path, exc)
         print("No alert sent: detector failed.")
         return False
 
+    print_result(result)
+    if not result.matched:
+        print(f"No alert sent: {result.matched_reason}.")
+        return False
+
+    return _notify_detection_result(image_path, result, notifier=notifier)
+
+
+def _notify_detection_result(
+    image_path: Path,
+    result: DetectionResult,
+    *,
+    notifier: OpenClawClient | None = None,
+) -> bool:
+    """Send the dog alert for an already computed scanner result."""
     print_result(result)
     if not result.matched:
         print(f"No alert sent: {result.matched_reason}.")
