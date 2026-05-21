@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shlex
 import subprocess
 from collections.abc import Mapping
@@ -32,7 +33,7 @@ class OpenClawClient:
         ssh_port: int = 22,
         binary: str = "openclaw",
         whatsapp_account: str = "business",
-        timeout_seconds: float = 10.0,
+        timeout_seconds: float = 60.0,
     ) -> None:
         self.notify_mode = notify_mode.lower()
         self.base_url = base_url.rstrip("/")
@@ -163,7 +164,7 @@ class OpenClawClient:
         return json.dumps(dict(event), sort_keys=True)
 
     def _build_ssh_argv(self, message: str) -> list[str]:
-        remote_args = [
+        remote_argv = [
             self.binary,
             "message",
             "send",
@@ -176,14 +177,32 @@ class OpenClawClient:
             "--message",
             message,
         ]
-        remote_command = " ".join(shlex.quote(arg) for arg in remote_args)
+        remote_command = shlex.join(remote_argv)
         return [
             "ssh",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=10",
             "-p",
             str(self.ssh_port),
             f"{self.ssh_user}@{self.ssh_host}",
             remote_command,
         ]
+
+    def _redact_ssh_output(self, output: str | bytes | None) -> str:
+        if output is None:
+            return ""
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", errors="replace")
+        redacted = output.strip()
+        if self.whatsapp_target:
+            redacted = redacted.replace(self.whatsapp_target, "<redacted-target>")
+            target_digits = re.sub(r"\D", "", self.whatsapp_target)
+            if len(target_digits) >= 4:
+                formatted_target_pattern = r"[\s().+-]*".join(re.escape(digit) for digit in target_digits)
+                redacted = re.sub(formatted_target_pattern, "<redacted-target>", redacted)
+        return redacted
 
     def _send_ssh_message(self, message: str) -> bool:
         """Send one WhatsApp message by invoking OpenClaw over SSH."""
@@ -199,8 +218,14 @@ class OpenClawClient:
         except FileNotFoundError:
             LOGGER.error("ssh executable was not found. Install an SSH client or use OPENCLAW_NOTIFY_MODE=http.")
             return False
-        except subprocess.TimeoutExpired:
-            LOGGER.error("Timed out sending OpenClaw SSH notification.")
+        except subprocess.TimeoutExpired as exc:
+            stdout = self._redact_ssh_output(exc.stdout)
+            stderr = self._redact_ssh_output(exc.stderr)
+            LOGGER.error(
+                "Timed out sending OpenClaw SSH notification: returncode=timeout stdout=%r stderr=%r",
+                stdout,
+                stderr,
+            )
             return False
         except OSError as exc:
             LOGGER.error("Failed to start OpenClaw SSH notification: %s", exc)
@@ -210,9 +235,12 @@ class OpenClawClient:
             LOGGER.info("Sent OpenClaw SSH WhatsApp notification.")
             return True
 
-        stderr = completed.stderr.strip()
-        if stderr:
-            LOGGER.error("OpenClaw SSH notification failed with exit code %s: %s", completed.returncode, stderr)
-        else:
-            LOGGER.error("OpenClaw SSH notification failed with exit code %s.", completed.returncode)
+        stdout = self._redact_ssh_output(completed.stdout)
+        stderr = self._redact_ssh_output(completed.stderr)
+        LOGGER.error(
+            "OpenClaw SSH notification failed: returncode=%s stdout=%r stderr=%r",
+            completed.returncode,
+            stdout,
+            stderr,
+        )
         return False
