@@ -57,6 +57,8 @@ OPENCLAW_SSH_USER=<openclaw-ssh-user>
 OPENCLAW_SSH_PORT=22
 OPENCLAW_BINARY=openclaw
 OPENCLAW_WHATSAPP_ACCOUNT=business
+OPENCLAW_SSH_MEDIA_REMOTE_DIR=/tmp/yorkie-watch
+OPENCLAW_SSH_MEDIA_COMMAND_TEMPLATE=
 
 YORKIE_DETECTOR_ENABLED=0
 YORKIE_DETECTOR_BACKEND=hailo_apps
@@ -78,6 +80,8 @@ Do not put real values in committed files. Keep real URLs, hostnames, tokens, ca
 - `disabled`: skip notification sends without contacting OpenClaw.
 
 `OPENCLAW_NOTIFY_MODE` defaults to `http` if unset. `OPENCLAW_EVENT_ENDPOINT` is optional and defaults to `/api/events/yorkie-watch`. `OPENCLAW_SSH_PORT`, `OPENCLAW_BINARY`, and `OPENCLAW_WHATSAPP_ACCOUNT` default to `22`, `openclaw`, and `business`.
+
+Snapshot attachments over SSH are opt-in because OpenClaw media CLI syntax must be verified on the Nano first. When `OPENCLAW_SSH_MEDIA_COMMAND_TEMPLATE` is set, the Pi copies the snapshot to `OPENCLAW_SSH_MEDIA_REMOTE_DIR` with `scp`, then runs the configured OpenClaw media command on the Nano. Available template placeholders are `{binary}`, `{channel}`, `{account}`, `{target}`, `{message}`, and `{media_path}`. Leave the template empty until the media command syntax is confirmed.
 
 `YORKIE_DETECTOR_ENABLED` defaults to `0`, so `--once` still only saves a Home Assistant snapshot unless you opt in to detection. The default detector backend is `hailo_apps`, using `/usr/share/hailo-models/yolov8m_h10.hef`, `dog` as the target class, and `0.35` as the minimum confidence.
 
@@ -119,6 +123,30 @@ For SSH mode, the script invokes OpenClaw with `subprocess.run` using argv and n
 ssh -o BatchMode=yes -o ConnectTimeout=10 -p <port> <ssh-user>@<ssh-host> <openclaw-binary> message send --channel whatsapp --account <account> --target <whatsapp-target> --message <message>
 ```
 
+## OpenClaw media discovery
+
+Probe OpenClaw help output over the configured SSH connection:
+
+```powershell
+python scripts/probe_openclaw_media.py
+```
+
+Equivalent manual commands using placeholders:
+
+```bash
+ssh <ssh-user>@<ssh-host> '<openclaw-binary> --help || true'
+ssh <ssh-user>@<ssh-host> '<openclaw-binary> message --help || true'
+ssh <ssh-user>@<ssh-host> '<openclaw-binary> message send --help || true'
+ssh <ssh-user>@<ssh-host> '<openclaw-binary> messages --help || true'
+ssh <ssh-user>@<ssh-host> '<openclaw-binary> media --help || true'
+```
+
+After confirming the media send syntax, set `OPENCLAW_SSH_MEDIA_COMMAND_TEMPLATE` in local `.env`. Example shape only:
+
+```dotenv
+OPENCLAW_SSH_MEDIA_COMMAND_TEMPLATE={binary} message send --channel {channel} --account {account} --target {target} --message {message} --media {media_path}
+```
+
 ## Hailo dog detection test
 
 Run the detector against an existing snapshot:
@@ -148,6 +176,14 @@ Run one detector test from the module entry point:
 ```powershell
 python -m yorkie_watch.main --test-detect data/snapshots/test_snapshot.jpg
 ```
+
+Ask for a snapshot plus detector summary:
+
+```powershell
+python -m yorkie_watch.main --what-see
+```
+
+When SSH media is configured, `--what-see` sends the saved snapshot as an attachment plus a detection summary. If media is not configured yet, it sends the text summary and logs that the snapshot attachment was skipped.
 
 You can also use the installed console script:
 

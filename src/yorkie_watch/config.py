@@ -28,6 +28,8 @@ class OpenClawConfig:
     binary: str
     whatsapp_account: str
     whatsapp_target: str
+    ssh_media_remote_dir: str
+    ssh_media_command_template: str
 
 
 @dataclass(frozen=True)
@@ -131,6 +133,8 @@ def load_openclaw_config() -> OpenClawConfig:
             binary="openclaw",
             whatsapp_account="business",
             whatsapp_target=get_env("OPENCLAW_WHATSAPP_TARGET", required=True),
+            ssh_media_remote_dir="",
+            ssh_media_command_template="",
         )
 
     if notify_mode == "ssh":
@@ -145,6 +149,9 @@ def load_openclaw_config() -> OpenClawConfig:
             binary=get_env("OPENCLAW_BINARY", "openclaw") or "openclaw",
             whatsapp_account=get_env("OPENCLAW_WHATSAPP_ACCOUNT", "business") or "business",
             whatsapp_target=get_env("OPENCLAW_WHATSAPP_TARGET", required=True),
+            ssh_media_remote_dir=get_env("OPENCLAW_SSH_MEDIA_REMOTE_DIR", "/tmp/yorkie-watch")
+            or "/tmp/yorkie-watch",
+            ssh_media_command_template=get_env("OPENCLAW_SSH_MEDIA_COMMAND_TEMPLATE"),
         )
 
     return OpenClawConfig(
@@ -158,6 +165,8 @@ def load_openclaw_config() -> OpenClawConfig:
         binary="openclaw",
         whatsapp_account="business",
         whatsapp_target="",
+        ssh_media_remote_dir="",
+        ssh_media_command_template="",
     )
 
 

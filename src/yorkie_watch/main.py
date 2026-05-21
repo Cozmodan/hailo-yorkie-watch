@@ -20,6 +20,11 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--once", action="store_true", help="Fetch one Home Assistant snapshot and save it locally.")
     mode.add_argument("--test-openclaw", action="store_true", help="Send one test event to OpenClaw.")
     mode.add_argument("--test-detect", metavar="IMAGE", help="Run detector once against an existing image.")
+    mode.add_argument(
+        "--what-see",
+        action="store_true",
+        help="Fetch one snapshot, run detection, and send a WhatsApp summary with the snapshot.",
+    )
     return parser
 
 
@@ -61,6 +66,39 @@ def run_test_detect(image_path: str) -> int:
     return 0 if result.ok else 1
 
 
+def run_what_see() -> int:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_path = SNAPSHOT_DIR / f"what_see_{timestamp}.jpg"
+    client = HomeAssistantClient.from_env()
+    saved_path = client.save_snapshot(output_path, attempts=3, delay_seconds=2.0)
+    print(f"Saved snapshot to {saved_path} ({saved_path.stat().st_size} bytes)")
+
+    detector = create_detector(load_detector_config())
+    try:
+        result = detector.detect(saved_path)
+    except DetectorError as exc:
+        LOGGER.error("Detector failed for %s: %s", saved_path, exc)
+        message = f"What I see: detector failed: {exc}"
+        confidence = 0.0
+    else:
+        print_result(result)
+        message = f"What I see: {_detection_summary(result)}"
+        confidence = _matched_confidence(result)
+
+    notifier = OpenClawClient.from_env()
+    if notifier.send_message(
+        message,
+        event_type="what_see",
+        confidence=confidence,
+        attachment_path=saved_path,
+    ):
+        print("What-see response sent.")
+        return 0
+
+    print("What-see response failed. Check logs and OpenClaw connectivity.")
+    return 1
+
+
 def run_detection_and_maybe_notify(
     image_path: Path,
     *,
@@ -83,7 +121,7 @@ def run_detection_and_maybe_notify(
     notifier = notifier or OpenClawClient.from_env()
     confidence = _matched_confidence(result)
     message = f"Dog detected by Hailo Yorkie Watch: {result.matched_reason}"
-    if notifier.send_message(message, event_type="dog_detected", confidence=confidence):
+    if notifier.send_message(message, event_type="dog_detected", confidence=confidence, attachment_path=image_path):
         print("Alert sent: dog detected.")
         return True
 
@@ -102,6 +140,22 @@ def _matched_confidence(result: DetectionResult) -> float:
     )
 
 
+def _detection_summary(result: DetectionResult) -> str:
+    if not result.ok:
+        return f"detector failed: {result.error or result.matched_reason}"
+    if not result.detections:
+        return result.matched_reason
+    detections = sorted(result.detections, key=lambda detection: detection.confidence, reverse=True)
+    parts = [
+        f"{detection.class_name or 'unknown'} {detection.confidence:.2f}"
+        for detection in detections[:5]
+    ]
+    summary = ", ".join(parts)
+    if result.matched:
+        return f"{result.matched_reason}. Top detections: {summary}"
+    return f"{result.matched_reason}. Top detections: {summary}"
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     args = build_parser().parse_args()
@@ -113,6 +167,8 @@ def main() -> int:
             return run_test_openclaw()
         if args.test_detect:
             return run_test_detect(args.test_detect)
+        if args.what_see:
+            return run_what_see()
     except (ConfigError, HomeAssistantError, ValueError) as exc:
         LOGGER.error("%s", exc)
         return 1

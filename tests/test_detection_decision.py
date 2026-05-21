@@ -30,12 +30,20 @@ class FakeNotifier:
     def __init__(self) -> None:
         self.messages: list[dict[str, object]] = []
 
-    def send_message(self, message: str, *, event_type: str = "yorkie_watch_test", confidence: float = 0.0) -> bool:
+    def send_message(
+        self,
+        message: str,
+        *,
+        event_type: str = "yorkie_watch_test",
+        confidence: float = 0.0,
+        attachment_path: str | Path | None = None,
+    ) -> bool:
         self.messages.append(
             {
                 "message": message,
                 "event_type": event_type,
                 "confidence": confidence,
+                "attachment_path": attachment_path,
             }
         )
         return True
@@ -66,6 +74,7 @@ class DetectionDecisionTests(unittest.TestCase):
         self.assertEqual(len(notifier.messages), 1)
         self.assertEqual(notifier.messages[0]["event_type"], "dog_detected")
         self.assertEqual(notifier.messages[0]["confidence"], 0.72)
+        self.assertEqual(notifier.messages[0]["attachment_path"], Path("snapshot.jpg"))
 
     def test_no_dog_does_not_send_notification(self) -> None:
         result = evaluate_detections(
