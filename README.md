@@ -2,14 +2,15 @@
 
 Hailo Yorkie Watch is a Raspberry Pi 5 + Raspberry Pi AI HAT+ 2 / Hailo-10H vision project designed to pull camera snapshots from Home Assistant and send future detection events to OpenClaw for WhatsApp alerts.
 
-This first milestone only implements plumbing:
+This first milestone implements plumbing plus an optional dog-detection stage:
 
 - Fetch one snapshot from a Home Assistant camera proxy endpoint.
 - Save local test snapshots under `data/snapshots/`.
-- Send a JSON test event to OpenClaw.
+- Optionally run a Hailo Apps object detector against the saved snapshot.
+- Send a WhatsApp notification through OpenClaw only when the configured detection condition matches.
 - Provide a small command-line entry point.
 
-Hailo inference, VLM support, and Yorkie breed detection are intentionally not implemented yet.
+VLM support and Yorkie breed recognition are intentionally not implemented yet. For now, a matching `dog` object is treated as the alert condition.
 
 ## Repository safety
 
@@ -56,6 +57,16 @@ OPENCLAW_SSH_USER=<openclaw-ssh-user>
 OPENCLAW_SSH_PORT=22
 OPENCLAW_BINARY=openclaw
 OPENCLAW_WHATSAPP_ACCOUNT=business
+
+YORKIE_DETECTOR_ENABLED=0
+YORKIE_DETECTOR_BACKEND=hailo_apps
+YORKIE_HAILO_HEF=/usr/share/hailo-models/yolov8m_h10.hef
+YORKIE_HAILO_APPS_ROOT=<hailo-apps-root>
+YORKIE_HAILO_PYTHON=python3
+YORKIE_DOG_CONFIDENCE=0.35
+YORKIE_TARGET_CLASSES=dog
+YORKIE_DETECTOR_TIMEOUT=60
+YORKIE_HAILO_DETECT_COMMAND=
 ```
 
 Do not put real values in committed files. Keep real URLs, hostnames, tokens, camera entity names, and WhatsApp targets in your local `.env` only.
@@ -67,6 +78,10 @@ Do not put real values in committed files. Keep real URLs, hostnames, tokens, ca
 - `disabled`: skip notification sends without contacting OpenClaw.
 
 `OPENCLAW_NOTIFY_MODE` defaults to `http` if unset. `OPENCLAW_EVENT_ENDPOINT` is optional and defaults to `/api/events/yorkie-watch`. `OPENCLAW_SSH_PORT`, `OPENCLAW_BINARY`, and `OPENCLAW_WHATSAPP_ACCOUNT` default to `22`, `openclaw`, and `business`.
+
+`YORKIE_DETECTOR_ENABLED` defaults to `0`, so `--once` still only saves a Home Assistant snapshot unless you opt in to detection. The default detector backend is `hailo_apps`, using `/usr/share/hailo-models/yolov8m_h10.hef`, `dog` as the target class, and `0.35` as the minimum confidence.
+
+`YORKIE_HAILO_APPS_ROOT` should point to the installed `hailo-apps` checkout on the Pi. `YORKIE_HAILO_PYTHON` defaults to `python3` so the detector subprocess can use system Hailo packages outside this project virtual environment. `YORKIE_HAILO_DETECT_COMMAND` is optional; leave it empty to use the repo wrapper, or set it to a JSON-emitting command template with `{image}`, `{hef}`, `{hailo_apps_root}`, `{threshold}`, and `{classes}` placeholders after verifying a custom Hailo command.
 
 ## Home Assistant snapshot test
 
@@ -101,12 +116,22 @@ The configured `OPENCLAW_WHATSAPP_TARGET` is added to the outgoing JSON as `what
 For SSH mode, the script invokes OpenClaw with `subprocess.run` using argv and no local shell:
 
 ```text
-ssh -p <port> <ssh-user>@<ssh-host> <openclaw-binary> message send --channel whatsapp --account <account> --target <whatsapp-target> --message <message>
+ssh -o BatchMode=yes -o ConnectTimeout=10 -p <port> <ssh-user>@<ssh-host> <openclaw-binary> message send --channel whatsapp --account <account> --target <whatsapp-target> --message <message>
 ```
+
+## Hailo dog detection test
+
+Run the detector against an existing snapshot:
+
+```powershell
+python scripts/test_hailo_detect.py data/snapshots/test_snapshot.jpg
+```
+
+The script prints JSON with `detections`, `matched`, and `matched_reason`. If `YORKIE_DETECTOR_ENABLED=0`, it prints a disabled detector result. If the Hailo Apps path or runtime is not available, it prints a clear JSON error instead of importing Hailo modules into the main app.
 
 ## Command-line usage
 
-Fetch one Home Assistant snapshot and save it under `data/snapshots/`:
+Fetch one Home Assistant snapshot and save it under `data/snapshots/`. If `YORKIE_DETECTOR_ENABLED=1`, this also runs detection and sends OpenClaw WhatsApp only when the dog condition matches:
 
 ```powershell
 python -m yorkie_watch.main --once
@@ -116,6 +141,12 @@ Send one OpenClaw test notification:
 
 ```powershell
 python -m yorkie_watch.main --test-openclaw
+```
+
+Run one detector test from the module entry point:
+
+```powershell
+python -m yorkie_watch.main --test-detect data/snapshots/test_snapshot.jpg
 ```
 
 You can also use the installed console script:
@@ -129,7 +160,8 @@ yorkie-watch --test-openclaw
 
 - Home Assistant Pi receives the external security camera feed.
 - Raspberry Pi 5 with AI HAT+ 2 pulls snapshots/frames from Home Assistant.
-- Hailo/VLM detection will be added later.
+- Hailo object detection is wired as an optional subprocess stage.
+- VLM detection will be added later.
 - Jetson Nano running OpenClaw will later send WhatsApp alerts.
 - GitHub remains the source of truth for non-secret project code.
 
