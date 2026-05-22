@@ -33,17 +33,33 @@ def main() -> int:
     try:
         import cv2  # type: ignore[import-not-found]
     except ImportError:
-        emit({"type": "error", "error": "OpenCV import failed in stream helper. Install cv2 for the stream Python."})
+        emit(
+            {
+                "type": "error",
+                "ok": False,
+                "source": "opencv",
+                "backend": "opencv",
+                "error": "OpenCV import failed in stream helper. Install cv2 for the stream Python.",
+            }
+        )
         return 2
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     capture = cv2.VideoCapture(args.url)
     if not capture.isOpened():
-        emit({"type": "error", "error": "OpenCV could not open the configured stream."})
+        emit(
+            {
+                "type": "error",
+                "ok": False,
+                "source": "opencv",
+                "backend": "opencv",
+                "error": "OpenCV could not open the configured stream.",
+            }
+        )
         return 3
 
-    emit({"type": "connected"})
+    emit({"type": "connected", "ok": True, "source": "opencv", "backend": "opencv"})
     sample_index = 0
     last_sample_at: float | None = None
     frame_interval = max(0.0, args.frame_interval)
@@ -51,7 +67,15 @@ def main() -> int:
         while True:
             ok, frame = capture.read()
             if not ok:
-                emit({"type": "error", "error": "OpenCV could not read the next stream frame."})
+                emit(
+                    {
+                        "type": "error",
+                        "ok": False,
+                        "source": "opencv",
+                        "backend": "opencv",
+                        "error": "OpenCV could not read the next stream frame.",
+                    }
+                )
                 return 4
 
             now = time.monotonic()
@@ -61,10 +85,29 @@ def main() -> int:
             sample_index += 1
             frame_path = next_frame_path(output_dir, sample_index)
             if not cv2.imwrite(str(frame_path), frame):
-                emit({"type": "error", "error": "OpenCV could not save a sampled stream frame."})
+                emit(
+                    {
+                        "type": "error",
+                        "ok": False,
+                        "source": "opencv",
+                        "backend": "opencv",
+                        "error": "OpenCV could not save a sampled stream frame.",
+                    }
+                )
                 return 5
             last_sample_at = now
-            emit({"type": "frame", "path": str(frame_path), "sample_index": sample_index})
+            emit(
+                {
+                    "type": "frame",
+                    "ok": True,
+                    "source": "opencv",
+                    "backend": "opencv",
+                    "frame_index": sample_index,
+                    "sample_index": sample_index,
+                    "frame_path": str(frame_path),
+                    "path": str(frame_path),
+                }
+            )
     except KeyboardInterrupt:
         return 0
     finally:

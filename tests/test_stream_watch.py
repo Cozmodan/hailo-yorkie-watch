@@ -12,12 +12,14 @@ from yorkie_watch.config import StreamConfig  # noqa: E402
 from yorkie_watch.detector import DetectionResult  # noqa: E402
 from yorkie_watch.main import build_parser, run_stream_watch_loop  # noqa: E402
 from yorkie_watch.stream_source import (  # noqa: E402
+    FFmpegSubprocessFrameSource,
     OpenCVSubprocessFrameSource,
     StreamSourceError,
     create_stream_source,
     redact_stream_output,
     resolve_stream_url,
 )
+from scripts.ffmpeg_stream_frames import build_ffmpeg_argv  # noqa: E402
 
 
 def stream_config(**overrides: object) -> StreamConfig:
@@ -26,9 +28,11 @@ def stream_config(**overrides: object) -> StreamConfig:
         "url": "<stream-url>",
         "backend": "opencv",
         "use_home_assistant": False,
+        "ha_base_url": "",
         "ha_stream_entity": "",
         "ha_stream_url": "",
-        "ha_stream_token": "",
+        "ha_long_lived_token": "",
+        "ha_stream_auth_mode": "bearer",
         "frame_interval_seconds": 5.0,
         "reconnect_seconds": 0.0,
         "max_failures": 0,
@@ -150,47 +154,135 @@ class StreamWatchTests(unittest.TestCase):
         self.assertEqual(args.stream_frames, 3)
         self.assertTrue(args.stream_save_debug_frame)
 
-    def test_home_assistant_hls_url_is_passed_to_frame_helper(self) -> None:
-        hls_url = "http://<home-assistant-host>:8123/api/hls/<placeholder>/master_playlist.m3u8"
-        source = OpenCVSubprocessFrameSource(
+    def test_home_assistant_backend_builds_camera_proxy_stream_url(self) -> None:
+        config = stream_config(
+            url="",
+            backend="home_assistant",
+            use_home_assistant=True,
+            ha_base_url="http://<home-assistant-host>:8123/",
+            ha_stream_entity="camera.<placeholder>",
+            ha_long_lived_token="<ha-long-lived-token>",
+        )
+
+        source = create_stream_source(config)
+
+        self.assertIsInstance(source, FFmpegSubprocessFrameSource)
+        self.assertEqual(
+            resolve_stream_url(config),
+            "http://<home-assistant-host>:8123/api/camera_proxy_stream/camera.%3Cplaceholder%3E",
+        )
+
+    def test_bearer_token_selects_ffmpeg_helper_header_command(self) -> None:
+        token = "<ha-long-lived-token>"
+        source = FFmpegSubprocessFrameSource(
             stream_config(
                 url="",
-                backend="ha_hls",
+                backend="home_assistant",
                 use_home_assistant=True,
-                ha_stream_url=hls_url,
-                ha_stream_token="<ha-stream-token>",
+                ha_base_url="http://<home-assistant-host>:8123",
+                ha_stream_entity="camera.<placeholder>",
+                ha_long_lived_token=token,
             )
         )
 
-        argv = source._build_helper_argv()
+        helper_argv = source._build_helper_argv()
+        ffmpeg_argv = build_ffmpeg_argv(
+            stream_url=source.stream_url,
+            output_pattern="data/stream_frames/frame_%08d.jpg",
+            frame_interval=5.0,
+            bearer_token=token,
+        )
 
-        self.assertEqual(argv[argv.index("--url") + 1], hls_url)
+        self.assertIn("ffmpeg_stream_frames.py", helper_argv[1])
+        self.assertEqual(helper_argv[helper_argv.index("--bearer-token") + 1], token)
+        self.assertEqual(ffmpeg_argv[ffmpeg_argv.index("-headers") + 1], f"Authorization: Bearer {token}\r\n")
 
-    def test_stream_redaction_removes_hls_url_and_token(self) -> None:
-        hls_url = "http://<home-assistant-host>:8123/api/hls/<placeholder>/master_playlist.m3u8"
-        token = "<ha-stream-token>"
-        config = stream_config(url="", backend="home_assistant", ha_stream_url=hls_url, ha_stream_token=token)
+    def test_stream_redaction_removes_authorization_token_and_url_query(self) -> None:
+        token = "<ha-long-lived-token>"
+        stream_url = "http://<home-assistant-host>:8123/api/camera_proxy_stream/camera.placeholder?token=<query-token>"
+        config = stream_config(
+            url="",
+            backend="home_assistant",
+            ha_stream_url=stream_url,
+            ha_long_lived_token=token,
+        )
 
         output = redact_stream_output(
             config,
-            f"failed opening {hls_url} using {token}",
-            resolved_url=hls_url,
+            f"Authorization: Bearer {token}\r\nfailed opening {stream_url}",
+            resolved_url="",
         )
 
-        self.assertNotIn(hls_url, output)
+        self.assertNotIn("Authorization: Bearer " + token, output)
         self.assertNotIn(token, output)
-        self.assertIn("<redacted-stream-value>", output)
+        self.assertNotIn("<query-token>", output)
+        self.assertIn("Authorization: Bearer <redacted-stream-value>", output)
 
     def test_direct_url_mode_still_uses_stream_url(self) -> None:
         direct_url = "rtsp://<camera-stream-host>/<placeholder>"
 
         self.assertEqual(resolve_stream_url(stream_config(url=direct_url)), direct_url)
 
+    def test_direct_opencv_backend_does_not_add_home_assistant_headers(self) -> None:
+        source = create_stream_source(stream_config(url="rtsp://<camera-stream-host>/<placeholder>"))
+
+        self.assertIsInstance(source, OpenCVSubprocessFrameSource)
+        self.assertNotIsInstance(source, FFmpegSubprocessFrameSource)
+        self.assertNotIn("--bearer-token", source._build_helper_argv())
+
     def test_stream_mode_fails_clearly_without_a_url(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "YORKIE_STREAM_URL"):
             create_stream_source(stream_config(url=""))
-        with self.assertRaisesRegex(RuntimeError, "YORKIE_HA_STREAM_URL or YORKIE_STREAM_URL"):
-            create_stream_source(stream_config(url="", backend="ha_hls", use_home_assistant=True))
+
+    def test_home_assistant_backend_requires_base_and_entity_without_override(self) -> None:
+        config = stream_config(
+            url="",
+            backend="home_assistant",
+            use_home_assistant=True,
+            ha_long_lived_token="<ha-long-lived-token>",
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "YORKIE_HA_BASE_URL"):
+            create_stream_source(config)
+        with self.assertRaisesRegex(RuntimeError, "YORKIE_HA_STREAM_ENTITY"):
+            create_stream_source(
+                stream_config(
+                    url="",
+                    backend="home_assistant",
+                    use_home_assistant=True,
+                    ha_base_url="http://<home-assistant-host>:8123",
+                    ha_long_lived_token="<ha-long-lived-token>",
+                )
+            )
+
+    def test_bearer_token_is_required_only_for_home_assistant_bearer_auth(self) -> None:
+        bearer_config = stream_config(
+            url="",
+            backend="home_assistant",
+            use_home_assistant=True,
+            ha_base_url="http://<home-assistant-host>:8123",
+            ha_stream_entity="camera.<placeholder>",
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "YORKIE_HA_LONG_LIVED_TOKEN"):
+            create_stream_source(bearer_config)
+        self.assertIsInstance(
+            create_stream_source(
+                stream_config(
+                    url="",
+                    backend="home_assistant",
+                    use_home_assistant=True,
+                    ha_base_url="http://<home-assistant-host>:8123",
+                    ha_stream_entity="camera.<placeholder>",
+                    ha_stream_auth_mode="none",
+                )
+            ),
+            FFmpegSubprocessFrameSource,
+        )
+        self.assertIsInstance(
+            create_stream_source(stream_config(url="rtsp://<camera-stream-host>/<placeholder>")),
+            OpenCVSubprocessFrameSource,
+        )
 
 
 if __name__ == "__main__":

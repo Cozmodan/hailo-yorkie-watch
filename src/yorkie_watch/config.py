@@ -85,9 +85,11 @@ class StreamConfig:
     url: str
     backend: str
     use_home_assistant: bool
+    ha_base_url: str
     ha_stream_entity: str
     ha_stream_url: str
-    ha_stream_token: str
+    ha_long_lived_token: str
+    ha_stream_auth_mode: str
     frame_interval_seconds: float
     reconnect_seconds: float
     max_failures: int
@@ -281,9 +283,11 @@ def load_stream_config() -> StreamConfig:
         url=get_env("YORKIE_STREAM_URL"),
         backend=(get_env("YORKIE_STREAM_BACKEND", "opencv") or "opencv").lower(),
         use_home_assistant=get_bool_env("YORKIE_STREAM_USE_HOME_ASSISTANT", False),
+        ha_base_url=get_env("YORKIE_HA_BASE_URL"),
         ha_stream_entity=get_env("YORKIE_HA_STREAM_ENTITY"),
         ha_stream_url=get_env("YORKIE_HA_STREAM_URL"),
-        ha_stream_token=get_env("YORKIE_HA_STREAM_TOKEN"),
+        ha_long_lived_token=get_env("YORKIE_HA_LONG_LIVED_TOKEN"),
+        ha_stream_auth_mode=(get_env("YORKIE_HA_STREAM_AUTH_MODE", "bearer") or "bearer").lower(),
         frame_interval_seconds=max(0.0, get_float_env("YORKIE_STREAM_FRAME_INTERVAL", 5.0)),
         reconnect_seconds=max(0.0, get_float_env("YORKIE_STREAM_RECONNECT_SECONDS", 5.0)),
         max_failures=max(0, get_int_env("YORKIE_STREAM_MAX_FAILURES", 0)),
