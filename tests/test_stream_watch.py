@@ -191,7 +191,8 @@ class StreamWatchTests(unittest.TestCase):
         helper_argv = source._build_helper_argv()
         ffmpeg_argv = ffmpeg_helper.build_ffmpeg_argv(
             stream_url=source.stream_url,
-            output_file="data/stream_frames/frame.jpg",
+            output_pattern="data/stream_frames/frame_%06d.jpg",
+            frame_interval=5.0,
             bearer_token=token,
         )
 
@@ -300,13 +301,15 @@ class StreamWatchTests(unittest.TestCase):
 
         self.assertEqual(args.frames, 3)
 
-    def test_ffmpeg_helper_success_emits_frame_lines_immediately(self) -> None:
+    def test_ffmpeg_helper_success_uses_one_process_and_emits_polled_frames(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             output = StringIO()
-
-            def fake_run(argv: list[str], **_kwargs: object):
-                Path(argv[-1]).write_bytes(b"jpeg")
-                return Mock(returncode=0, stderr="")
+            output_pattern = Path(temp_dir) / "run_%06d.jpg"
+            for index in range(1, 4):
+                (Path(temp_dir) / f"run_{index:06d}.jpg").write_bytes(b"jpeg")
+            process = Mock()
+            process.stderr = StringIO("")
+            process.wait.return_value = 0
 
             with (
                 patch.object(
@@ -324,21 +327,27 @@ class StreamWatchTests(unittest.TestCase):
                         "3",
                     ],
                 ),
-                patch("scripts.ffmpeg_stream_frames.subprocess.run", side_effect=fake_run),
+                patch("scripts.ffmpeg_stream_frames.build_output_pattern", return_value=output_pattern),
+                patch("scripts.ffmpeg_stream_frames.subprocess.Popen", return_value=process) as popen,
+                patch("scripts.ffmpeg_stream_frames.time.sleep"),
                 redirect_stdout(output),
             ):
                 returncode = ffmpeg_helper.main()
 
         lines = [line for line in output.getvalue().splitlines() if '"type": "frame"' in line]
         self.assertEqual(returncode, 0)
+        self.assertEqual(popen.call_count, 1)
         self.assertEqual(len(lines), 3)
         self.assertIn('"frame_index": 3', lines[-1])
 
-    def test_ffmpeg_helper_failure_emits_redacted_error(self) -> None:
+    def test_ffmpeg_helper_early_exit_emits_redacted_error(self) -> None:
         token = "<ha-long-lived-token>"
         url = "http://<home-assistant-host>:8123/api/camera_proxy_stream/camera.placeholder?token=<query-token>"
         output = StringIO()
         with tempfile.TemporaryDirectory() as temp_dir:
+            process = Mock()
+            process.poll.return_value = 8
+            process.stderr = StringIO(f"Authorization: Bearer {token}\nfailed opening {url}")
             with (
                 patch.object(
                     sys,
@@ -355,13 +364,7 @@ class StreamWatchTests(unittest.TestCase):
                         token,
                     ],
                 ),
-                patch(
-                    "scripts.ffmpeg_stream_frames.subprocess.run",
-                    return_value=Mock(
-                        returncode=8,
-                        stderr=f"Authorization: Bearer {token}\nfailed opening {url}",
-                    ),
-                ),
+                patch("scripts.ffmpeg_stream_frames.subprocess.Popen", return_value=process),
                 redirect_stdout(output),
             ):
                 returncode = ffmpeg_helper.main()
