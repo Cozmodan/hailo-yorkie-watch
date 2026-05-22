@@ -10,8 +10,8 @@ from typing import Any
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Sample JPEG frames from one OpenCV camera stream.")
-    parser.add_argument("--url", required=True, help="Stream URL loaded from local runtime configuration.")
+    parser = argparse.ArgumentParser(description="Sample JPEG frames from one OpenCV RTSP or HLS stream.")
+    parser.add_argument("--url", required=True, help="RTSP or HLS stream URL loaded from local runtime configuration.")
     parser.add_argument("--output-dir", required=True, help="Directory where sampled JPEG frames are written.")
     parser.add_argument("--frame-interval", type=float, default=5.0, help="Seconds between sampled frames.")
     return parser

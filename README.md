@@ -94,6 +94,10 @@ YORKIE_WATCH_STOP_ON_ERROR=0
 YORKIE_STREAM_ENABLED=0
 YORKIE_STREAM_URL=<camera-stream-url>
 YORKIE_STREAM_BACKEND=opencv
+YORKIE_STREAM_USE_HOME_ASSISTANT=0
+YORKIE_HA_STREAM_ENTITY=camera.<placeholder>
+YORKIE_HA_STREAM_URL=
+YORKIE_HA_STREAM_TOKEN=
 YORKIE_STREAM_FRAME_INTERVAL=5
 YORKIE_STREAM_RECONNECT_SECONDS=5
 YORKIE_STREAM_MAX_FAILURES=0
@@ -119,7 +123,19 @@ Snapshot attachments over SSH are opt-in because OpenClaw media CLI syntax must 
 
 `YORKIE_HAILO_APPS_ROOT` should point to the installed `hailo-apps` checkout on the Pi. `YORKIE_HAILO_PYTHON` defaults to `python3` so the detector subprocess can use system Hailo packages outside this project virtual environment. `YORKIE_HAILO_DETECT_COMMAND` is optional; leave it empty to use the repo wrapper, or set it to a JSON-emitting command template with `{image}`, `{hef}`, `{hailo_apps_root}`, `{threshold}`, and `{classes}` placeholders after verifying a custom Hailo command.
 
-`YORKIE_STREAM_ENABLED` defaults to `0`. Live stream mode reads `YORKIE_STREAM_URL` only from runtime environment, samples JPEG frames with the `opencv` stream backend, and feeds those frame paths through the same scanner and Hailo detector flow. `YORKIE_STREAM_PYTHON` defaults to `python3` so OpenCV capture can run in a system Python helper when this project virtual environment does not provide `cv2`.
+`YORKIE_STREAM_ENABLED` defaults to `0`. Direct live stream mode reads `YORKIE_STREAM_URL` only from runtime environment, samples JPEG frames with the `opencv` stream backend, and feeds those frame paths through the same scanner and Hailo detector flow. `YORKIE_STREAM_PYTHON` defaults to `python3` so OpenCV capture can run in a system Python helper when this project virtual environment does not provide `cv2`.
+
+Home Assistant HLS mode is available for camera integrations that expose a Home Assistant playlist rather than a local RTSP URL. Set `YORKIE_STREAM_BACKEND=ha_hls` or `YORKIE_STREAM_BACKEND=home_assistant`, enable `YORKIE_STREAM_USE_HOME_ASSISTANT=1`, and put a ready HLS playlist URL in local `.env` as either `YORKIE_HA_STREAM_URL` or `YORKIE_STREAM_URL`:
+
+```dotenv
+YORKIE_STREAM_BACKEND=ha_hls
+YORKIE_STREAM_USE_HOME_ASSISTANT=1
+YORKIE_HA_STREAM_ENTITY=camera.<placeholder>
+YORKIE_HA_STREAM_URL=http://<home-assistant-host>:8123/api/hls/<placeholder>/master_playlist.m3u8
+YORKIE_HA_STREAM_TOKEN=<home-assistant-stream-token>
+```
+
+The current helper consumes a usable HLS playlist URL; it does not yet request a fresh HLS URL from Home Assistant automatically. `YORKIE_HA_STREAM_ENTITY` and `YORKIE_HA_STREAM_TOKEN` stay local and are redacted from stream helper output handling.
 
 ## Multi-stage night scanner
 
@@ -259,7 +275,7 @@ Watch a live camera stream instead of requesting Home Assistant snapshots:
 python -m yorkie_watch.main --watch-stream
 ```
 
-Stream watch mode is opt-in: set `YORKIE_STREAM_ENABLED=1` and put the real stream URL in local `.env` only. The OpenCV helper reads frames continuously, saves one sampled frame every `YORKIE_STREAM_FRAME_INTERVAL` seconds under `YORKIE_STREAM_DEBUG_DIR`, runs the existing multi-stage scanner on that JPEG, and sends the sampled frame as the alert attachment when the detector condition matches. It reconnects after stream failures using `YORKIE_STREAM_RECONNECT_SECONDS`; `YORKIE_STREAM_MAX_FAILURES=0` leaves reconnect attempts unlimited.
+Stream watch mode is opt-in: set `YORKIE_STREAM_ENABLED=1` and put the real RTSP or Home Assistant HLS URL in local `.env` only. The OpenCV helper reads frames continuously, saves one sampled frame every `YORKIE_STREAM_FRAME_INTERVAL` seconds under `YORKIE_STREAM_DEBUG_DIR`, runs the existing multi-stage scanner on that JPEG, and sends the sampled frame as the alert attachment when the detector condition matches. It reconnects after stream failures using `YORKIE_STREAM_RECONNECT_SECONDS`; `YORKIE_STREAM_MAX_FAILURES=0` leaves reconnect attempts unlimited.
 
 Run a bounded stream test and keep its sampled frames:
 

@@ -11,7 +11,13 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from yorkie_watch.config import StreamConfig  # noqa: E402
 from yorkie_watch.detector import DetectionResult  # noqa: E402
 from yorkie_watch.main import build_parser, run_stream_watch_loop  # noqa: E402
-from yorkie_watch.stream_source import StreamSourceError  # noqa: E402
+from yorkie_watch.stream_source import (  # noqa: E402
+    OpenCVSubprocessFrameSource,
+    StreamSourceError,
+    create_stream_source,
+    redact_stream_output,
+    resolve_stream_url,
+)
 
 
 def stream_config(**overrides: object) -> StreamConfig:
@@ -19,6 +25,10 @@ def stream_config(**overrides: object) -> StreamConfig:
         "enabled": True,
         "url": "<stream-url>",
         "backend": "opencv",
+        "use_home_assistant": False,
+        "ha_stream_entity": "",
+        "ha_stream_url": "",
+        "ha_stream_token": "",
         "frame_interval_seconds": 5.0,
         "reconnect_seconds": 0.0,
         "max_failures": 0,
@@ -133,11 +143,54 @@ class StreamWatchTests(unittest.TestCase):
     def test_snapshot_watch_and_stream_watch_cli_modes_remain_available(self) -> None:
         parser = build_parser()
 
+        self.assertTrue(parser.parse_args(["--once"]).once)
         self.assertTrue(parser.parse_args(["--watch"]).watch)
         args = parser.parse_args(["--watch-stream", "--stream-frames", "3", "--stream-save-debug-frame"])
         self.assertTrue(args.watch_stream)
         self.assertEqual(args.stream_frames, 3)
         self.assertTrue(args.stream_save_debug_frame)
+
+    def test_home_assistant_hls_url_is_passed_to_frame_helper(self) -> None:
+        hls_url = "http://<home-assistant-host>:8123/api/hls/<placeholder>/master_playlist.m3u8"
+        source = OpenCVSubprocessFrameSource(
+            stream_config(
+                url="",
+                backend="ha_hls",
+                use_home_assistant=True,
+                ha_stream_url=hls_url,
+                ha_stream_token="<ha-stream-token>",
+            )
+        )
+
+        argv = source._build_helper_argv()
+
+        self.assertEqual(argv[argv.index("--url") + 1], hls_url)
+
+    def test_stream_redaction_removes_hls_url_and_token(self) -> None:
+        hls_url = "http://<home-assistant-host>:8123/api/hls/<placeholder>/master_playlist.m3u8"
+        token = "<ha-stream-token>"
+        config = stream_config(url="", backend="home_assistant", ha_stream_url=hls_url, ha_stream_token=token)
+
+        output = redact_stream_output(
+            config,
+            f"failed opening {hls_url} using {token}",
+            resolved_url=hls_url,
+        )
+
+        self.assertNotIn(hls_url, output)
+        self.assertNotIn(token, output)
+        self.assertIn("<redacted-stream-value>", output)
+
+    def test_direct_url_mode_still_uses_stream_url(self) -> None:
+        direct_url = "rtsp://<camera-stream-host>/<placeholder>"
+
+        self.assertEqual(resolve_stream_url(stream_config(url=direct_url)), direct_url)
+
+    def test_stream_mode_fails_clearly_without_a_url(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "YORKIE_STREAM_URL"):
+            create_stream_source(stream_config(url=""))
+        with self.assertRaisesRegex(RuntimeError, "YORKIE_HA_STREAM_URL or YORKIE_STREAM_URL"):
+            create_stream_source(stream_config(url="", backend="ha_hls", use_home_assistant=True))
 
 
 if __name__ == "__main__":

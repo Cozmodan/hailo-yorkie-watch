@@ -10,7 +10,9 @@ from typing import Any, Protocol
 from .config import ConfigError, StreamConfig
 
 LOGGER = logging.getLogger(__name__)
-SUPPORTED_STREAM_BACKENDS = {"opencv"}
+DIRECT_STREAM_BACKEND = "opencv"
+HOME_ASSISTANT_STREAM_BACKENDS = {"home_assistant", "ha_hls"}
+SUPPORTED_STREAM_BACKENDS = {DIRECT_STREAM_BACKEND, *HOME_ASSISTANT_STREAM_BACKENDS}
 
 
 class StreamSourceError(RuntimeError):
@@ -32,20 +34,11 @@ class OpenCVSubprocessFrameSource:
 
     def __init__(self, config: StreamConfig) -> None:
         self.config = config
+        self.stream_url = resolve_stream_url(config)
         self.process: subprocess.Popen[str] | None = None
 
     def __enter__(self) -> "OpenCVSubprocessFrameSource":
-        helper_path = Path(__file__).resolve().parents[2] / "scripts" / "opencv_stream_frames.py"
-        argv = [
-            self.config.python_executable,
-            str(helper_path),
-            "--url",
-            self.config.url,
-            "--output-dir",
-            self.config.debug_dir,
-            "--frame-interval",
-            str(self.config.frame_interval_seconds),
-        ]
+        argv = self._build_helper_argv()
         try:
             self.process = subprocess.Popen(
                 argv,
@@ -59,6 +52,19 @@ class OpenCVSubprocessFrameSource:
         except OSError as exc:
             raise StreamSourceError(f"Could not start stream frame helper: {exc}") from exc
         return self
+
+    def _build_helper_argv(self) -> list[str]:
+        helper_path = Path(__file__).resolve().parents[2] / "scripts" / "opencv_stream_frames.py"
+        return [
+            self.config.python_executable,
+            str(helper_path),
+            "--url",
+            self.stream_url,
+            "--output-dir",
+            self.config.debug_dir,
+            "--frame-interval",
+            str(self.config.frame_interval_seconds),
+        ]
 
     def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> bool:
         self.close()
@@ -110,18 +116,45 @@ class OpenCVSubprocessFrameSource:
         process = self.process
         if process is None or process.stderr is None:
             return ""
-        return _redact_value(process.stderr.read(), self.config.url)
+        return redact_stream_output(self.config, process.stderr.read(), resolved_url=self.stream_url)
 
 
 def create_stream_source(config: StreamConfig) -> StreamFrameSource:
     """Create the configured live stream frame source."""
     if not config.enabled:
         raise ConfigError("YORKIE_STREAM_ENABLED=1 is required for --watch-stream.")
-    if not config.url:
-        raise ConfigError("YORKIE_STREAM_URL is required for --watch-stream.")
     if config.backend not in SUPPORTED_STREAM_BACKENDS:
         raise ValueError(f"YORKIE_STREAM_BACKEND must be one of: {', '.join(sorted(SUPPORTED_STREAM_BACKENDS))}")
     return OpenCVSubprocessFrameSource(config)
+
+
+def resolve_stream_url(config: StreamConfig) -> str:
+    """Resolve the local runtime URL consumed by the frame helper."""
+    if uses_home_assistant_stream(config):
+        if config.ha_stream_url:
+            return config.ha_stream_url
+        if config.url:
+            return config.url
+        raise ConfigError(
+            "Home Assistant stream mode needs YORKIE_HA_STREAM_URL or YORKIE_STREAM_URL with an HLS URL."
+        )
+
+    if config.url:
+        return config.url
+    raise ConfigError("YORKIE_STREAM_URL is required for --watch-stream.")
+
+
+def uses_home_assistant_stream(config: StreamConfig) -> bool:
+    """Return whether a stream config consumes a Home Assistant HLS URL."""
+    return config.use_home_assistant or config.backend in HOME_ASSISTANT_STREAM_BACKENDS
+
+
+def redact_stream_output(config: StreamConfig, output: str, *, resolved_url: str = "") -> str:
+    """Remove configured stream secrets from output intended for logs or errors."""
+    redacted = output
+    for sensitive_value in (resolved_url, config.url, config.ha_stream_url, config.ha_stream_token):
+        redacted = _redact_value(redacted, sensitive_value)
+    return redacted
 
 
 def _parse_event(line: str) -> dict[str, Any]:
@@ -135,7 +168,7 @@ def _parse_event(line: str) -> dict[str, Any]:
 
 
 def _redact_value(output: str, sensitive_value: str) -> str:
-    return output.replace(sensitive_value, "<redacted-stream-url>") if sensitive_value else output
+    return output.replace(sensitive_value, "<redacted-stream-value>") if sensitive_value else output
 
 
 def _short_output(output: str | bytes | None, *, max_chars: int = 800) -> str:
