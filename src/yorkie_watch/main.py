@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import argparse
 import logging
+import time
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
-from .config import ConfigError, load_detector_config, load_scan_config
+from .config import ConfigError, WatchConfig, load_detector_config, load_scan_config, load_watch_config
 from .detector import COCO_DOG_CLASS_ID, DetectionResult, DetectorError, create_detector, print_result
 from .ha_client import HomeAssistantClient, HomeAssistantError
 from .openclaw_client import OpenClawClient
@@ -15,16 +18,32 @@ LOGGER = logging.getLogger(__name__)
 SNAPSHOT_DIR = Path("data") / "snapshots"
 
 
+@dataclass
+class WatchState:
+    """In-memory state for one continuous watch process."""
+
+    iterations: int = 0
+    last_alert_at: float | None = None
+    last_snapshot_path: Path | None = None
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Hailo Yorkie Watch plumbing CLI")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--once", action="store_true", help="Fetch one Home Assistant snapshot and save it locally.")
+    mode.add_argument("--watch", action="store_true", help="Continuously scan Home Assistant snapshots for alerts.")
     mode.add_argument("--test-openclaw", action="store_true", help="Send one test event to OpenClaw.")
     mode.add_argument("--test-detect", metavar="IMAGE", help="Run detector once against an existing image.")
     mode.add_argument(
         "--what-see",
         action="store_true",
         help="Fetch one snapshot, run detection, and send a WhatsApp summary with the snapshot.",
+    )
+    parser.add_argument(
+        "--watch-iterations",
+        metavar="N",
+        type=int,
+        help="Override YORKIE_WATCH_MAX_ITERATIONS for bounded watch-mode test runs.",
     )
     return parser
 
@@ -55,6 +74,125 @@ def run_once() -> int:
         else:
             run_detection_and_maybe_notify(saved_path, detector=detector)
     return 0
+
+
+def run_watch(*, max_iterations: int | None = None) -> int:
+    """Continuously capture, scan, and notify until stopped or iteration-limited."""
+    watch_config = load_watch_config()
+    if max_iterations is not None:
+        if max_iterations < 0:
+            raise ValueError("--watch-iterations must be zero or greater.")
+        watch_config = replace(watch_config, max_iterations=max_iterations)
+
+    client = HomeAssistantClient.from_env()
+    detector = create_detector(load_detector_config())
+    scan_config = load_scan_config()
+    notifier: OpenClawClient | None = None
+
+    def capture_snapshot(iteration: int) -> Path:
+        return client.save_snapshot(_watch_snapshot_path(iteration), attempts=3, delay_seconds=2.0)
+
+    def scan_snapshot(snapshot_path: Path, iteration: int) -> DetectionResult:
+        if scan_config.confirm_frames > 1:
+            return scan_confirmed_snapshots(
+                capture_snapshot=lambda frame_index: snapshot_path
+                if frame_index == 0
+                else client.save_snapshot(
+                    _watch_snapshot_path(iteration, frame_index=frame_index),
+                    attempts=3,
+                    delay_seconds=2.0,
+                ),
+                detector=detector,
+                config=scan_config,
+            )
+        return scan_image(snapshot_path, detector=detector, config=scan_config).result
+
+    def notify_alert(snapshot_path: Path, result: DetectionResult) -> bool:
+        nonlocal notifier
+        notifier = notifier or OpenClawClient.from_env()
+        return _notify_detection_result(snapshot_path, result, notifier=notifier)
+
+    def send_heartbeat(iteration: int) -> bool:
+        nonlocal notifier
+        notifier = notifier or OpenClawClient.from_env()
+        return notifier.send_message(
+            f"Yorkie Watch heartbeat: iteration {iteration} complete.",
+            event_type="watch_heartbeat",
+        )
+
+    LOGGER.info("Starting watch mode.")
+    try:
+        state = run_watch_loop(
+            config=watch_config,
+            capture_snapshot=capture_snapshot,
+            scan_snapshot=scan_snapshot,
+            notify_alert=notify_alert,
+            send_heartbeat=send_heartbeat,
+        )
+    except KeyboardInterrupt:
+        LOGGER.info("Watch mode stopped.")
+        print("Watch mode stopped.")
+        return 0
+
+    LOGGER.info("Watch mode finished after %d iteration(s).", state.iterations)
+    return 0
+
+
+def run_watch_loop(
+    *,
+    config: WatchConfig,
+    capture_snapshot: Callable[[int], Path],
+    scan_snapshot: Callable[[Path, int], DetectionResult],
+    notify_alert: Callable[[Path, DetectionResult], bool],
+    send_heartbeat: Callable[[int], bool] | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> WatchState:
+    """Run the watch loop with injectable IO boundaries for tests."""
+    state = WatchState()
+    while config.max_iterations == 0 or state.iterations < config.max_iterations:
+        state.iterations += 1
+        iteration = state.iterations
+        try:
+            snapshot_path = capture_snapshot(iteration)
+        except HomeAssistantError as exc:
+            LOGGER.warning("Watch snapshot fetch failed: %s", exc)
+            if config.stop_on_error:
+                raise
+            if config.reuse_last_snapshot_on_ha_fail and state.last_snapshot_path is not None:
+                snapshot_path = state.last_snapshot_path
+                LOGGER.info("Reusing last snapshot after Home Assistant fetch failure.")
+            else:
+                _watch_iteration_finished(config, iteration, send_heartbeat, sleep)
+                continue
+        else:
+            state.last_snapshot_path = snapshot_path
+
+        try:
+            result = scan_snapshot(snapshot_path, iteration)
+        except HomeAssistantError as exc:
+            LOGGER.warning("Watch snapshot fetch failed during scan confirmation: %s", exc)
+            if config.stop_on_error:
+                raise
+        except DetectorError as exc:
+            LOGGER.warning("Watch detector failed: %s", exc)
+            if config.stop_on_error:
+                raise
+        else:
+            if result.matched:
+                alert_time = clock()
+                if _watch_cooldown_active(state, config, alert_time):
+                    LOGGER.info("alert matched but cooldown active; no message sent")
+                elif notify_alert(snapshot_path, result):
+                    state.last_alert_at = alert_time
+                else:
+                    LOGGER.warning("Alert condition matched, but notification was not sent.")
+            elif config.send_no_match_log:
+                LOGGER.info("watch no alert: %s", result.matched_reason)
+
+        _watch_iteration_finished(config, iteration, send_heartbeat, sleep)
+
+    return state
 
 
 def run_test_openclaw() -> int:
@@ -174,6 +312,36 @@ def _matched_confidence(result: DetectionResult) -> float:
     )
 
 
+def _watch_snapshot_path(iteration: int, *, frame_index: int = 0) -> Path:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    frame_suffix = "" if frame_index == 0 else f"_frame{frame_index + 1}"
+    return SNAPSHOT_DIR / f"watch_{timestamp}_iter{iteration}{frame_suffix}.jpg"
+
+
+def _watch_cooldown_active(state: WatchState, config: WatchConfig, alert_time: float) -> bool:
+    if state.last_alert_at is None:
+        return False
+    return alert_time - state.last_alert_at < config.cooldown_seconds
+
+
+def _watch_iteration_finished(
+    config: WatchConfig,
+    iteration: int,
+    send_heartbeat: Callable[[int], bool] | None,
+    sleep: Callable[[float], None],
+) -> None:
+    if send_heartbeat is not None and config.heartbeat_every > 0 and iteration % config.heartbeat_every == 0:
+        if send_heartbeat(iteration):
+            LOGGER.info("Watch heartbeat sent after iteration %d.", iteration)
+        else:
+            LOGGER.warning("Watch heartbeat notification failed after iteration %d.", iteration)
+
+    if config.max_iterations and iteration >= config.max_iterations:
+        return
+    if config.interval_seconds > 0:
+        sleep(config.interval_seconds)
+
+
 def _detection_summary(result: DetectionResult) -> str:
     if not result.ok:
         return f"detector failed: {result.error or result.matched_reason}"
@@ -197,13 +365,15 @@ def main() -> int:
     try:
         if args.once:
             return run_once()
+        if args.watch:
+            return run_watch(max_iterations=args.watch_iterations)
         if args.test_openclaw:
             return run_test_openclaw()
         if args.test_detect:
             return run_test_detect(args.test_detect)
         if args.what_see:
             return run_what_see()
-    except (ConfigError, HomeAssistantError, ValueError) as exc:
+    except (ConfigError, DetectorError, HomeAssistantError, ValueError) as exc:
         LOGGER.error("%s", exc)
         return 1
 

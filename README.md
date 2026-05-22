@@ -81,6 +81,14 @@ YORKIE_CONFIRM_FRAMES=2
 YORKIE_CONFIRM_INTERVAL_SECONDS=1.0
 YORKIE_MAX_CROPS_PER_IMAGE=8
 YORKIE_SAVE_DEBUG_CROPS=1
+
+YORKIE_WATCH_INTERVAL_SECONDS=5
+YORKIE_WATCH_COOLDOWN_SECONDS=300
+YORKIE_WATCH_MAX_ITERATIONS=
+YORKIE_WATCH_SEND_NO_MATCH_LOG=1
+YORKIE_WATCH_HEARTBEAT_EVERY=0
+YORKIE_WATCH_REUSE_LAST_SNAPSHOT_ON_HA_FAIL=0
+YORKIE_WATCH_STOP_ON_ERROR=0
 ```
 
 Do not put real values in committed files. Keep real URLs, hostnames, tokens, camera entity names, and WhatsApp targets in your local `.env` only.
@@ -115,7 +123,7 @@ Person detections are only used as region-of-interest cues. The project does not
 
 Crop detections are mapped back to original snapshot coordinates and include a `source` value in JSON such as `full_frame`, `tile`, `lower_half`, `person_roi`, or `center_zoom`. When `YORKIE_SAVE_DEBUG_CROPS=1`, crop images are saved under `data/debug_crops/`; repository image ignore rules keep these real camera crops out of Git.
 
-`YORKIE_CONFIRM_FRAMES` controls optional multi-frame confirmation for `--once` alerts. The default `2` means the app can take two snapshots separated by `YORKIE_CONFIRM_INTERVAL_SECONDS` and alert only when dog detection appears in both frames. Set `YORKIE_CONFIRM_FRAMES=1` for faster manual single-frame testing.
+`YORKIE_CONFIRM_FRAMES` controls optional multi-frame confirmation for `--once` and `--watch` alerts. The default `2` means the app can take two snapshots separated by `YORKIE_CONFIRM_INTERVAL_SECONDS` and alert only when dog detection appears in both frames. Set `YORKIE_CONFIRM_FRAMES=1` for faster manual single-frame testing.
 
 ## Home Assistant snapshot test
 
@@ -215,12 +223,58 @@ python -m yorkie_watch.main --what-see
 
 When SSH media is configured, `--what-see` sends the saved snapshot as an attachment plus a detection summary. If media is not configured yet, it sends the text summary and logs that the snapshot attachment was skipped.
 
+Run continuously until Ctrl+C or a service manager stops the process:
+
+```powershell
+python -m yorkie_watch.main --watch
+```
+
+Watch mode fetches a fresh Home Assistant snapshot every `YORKIE_WATCH_INTERVAL_SECONDS`, runs the same multi-stage scanner used by alert scans, and only sends WhatsApp when the alert condition matches. It keeps scanning during `YORKIE_WATCH_COOLDOWN_SECONDS`; matched alerts inside the cooldown are logged without sending a repeated message. Home Assistant and detector failures are logged and retried on the next watch iteration unless `YORKIE_WATCH_STOP_ON_ERROR=1`.
+
+Use `YORKIE_WATCH_MAX_ITERATIONS` or a CLI override for bounded checks:
+
+```powershell
+python -m yorkie_watch.main --watch --watch-iterations 2
+```
+
+An empty or zero `YORKIE_WATCH_MAX_ITERATIONS` runs forever. `YORKIE_WATCH_SEND_NO_MATCH_LOG=1` logs no-alert scans. `YORKIE_WATCH_HEARTBEAT_EVERY=0` disables heartbeat WhatsApp messages; set a positive iteration count to opt in. `YORKIE_WATCH_REUSE_LAST_SNAPSHOT_ON_HA_FAIL=0` keeps failed Home Assistant fetches from scanning stale images by default.
+
 You can also use the installed console script:
 
 ```powershell
 yorkie-watch --once
 yorkie-watch --test-openclaw
 ```
+
+## Systemd watch service
+
+Example service file path:
+
+```text
+/etc/systemd/system/yorkie-watch.service
+```
+
+Example contents using placeholders:
+
+```ini
+[Unit]
+Description=Hailo Yorkie Watch
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=<user>
+WorkingDirectory=/home/<user>/hailo-yorkie-watch
+ExecStart=/home/<user>/hailo-yorkie-watch/.venv/bin/python -m yorkie_watch.main --watch
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Keep the local `.env` file in the working directory so Python loads runtime credentials on the Pi. Do not put Home Assistant, OpenClaw, SSH, or WhatsApp secrets into the public service example.
 
 ## Current hardware architecture
 
@@ -230,4 +284,3 @@ yorkie-watch --test-openclaw
 - VLM detection will be added later.
 - Jetson Nano running OpenClaw will later send WhatsApp alerts.
 - GitHub remains the source of truth for non-secret project code.
-

@@ -64,6 +64,19 @@ class ScanConfig:
     save_debug_crops: bool
 
 
+@dataclass(frozen=True)
+class WatchConfig:
+    """Runtime settings for continuous watch mode."""
+
+    interval_seconds: float
+    cooldown_seconds: float
+    max_iterations: int
+    send_no_match_log: bool
+    heartbeat_every: int
+    reuse_last_snapshot_on_ha_fail: bool
+    stop_on_error: bool
+
+
 def load_environment(env_path: str | Path | None = None) -> None:
     """Load environment variables from `.env` without overriding existing values."""
     loaded = load_dotenv(dotenv_path=env_path, override=False)
@@ -223,4 +236,18 @@ def load_scan_config() -> ScanConfig:
         confirm_interval_seconds=max(0.0, get_float_env("YORKIE_CONFIRM_INTERVAL_SECONDS", 1.0)),
         max_crops_per_image=max(0, get_int_env("YORKIE_MAX_CROPS_PER_IMAGE", 8)),
         save_debug_crops=get_bool_env("YORKIE_SAVE_DEBUG_CROPS", True),
+    )
+
+
+def load_watch_config() -> WatchConfig:
+    """Load continuous watcher settings from `.env` / process environment."""
+    load_environment()
+    return WatchConfig(
+        interval_seconds=max(0.0, get_float_env("YORKIE_WATCH_INTERVAL_SECONDS", 5.0)),
+        cooldown_seconds=max(0.0, get_float_env("YORKIE_WATCH_COOLDOWN_SECONDS", 300.0)),
+        max_iterations=max(0, get_int_env("YORKIE_WATCH_MAX_ITERATIONS", 0)),
+        send_no_match_log=get_bool_env("YORKIE_WATCH_SEND_NO_MATCH_LOG", True),
+        heartbeat_every=max(0, get_int_env("YORKIE_WATCH_HEARTBEAT_EVERY", 0)),
+        reuse_last_snapshot_on_ha_fail=get_bool_env("YORKIE_WATCH_REUSE_LAST_SNAPSHOT_ON_HA_FAIL", False),
+        stop_on_error=get_bool_env("YORKIE_WATCH_STOP_ON_ERROR", False),
     )
