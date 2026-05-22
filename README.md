@@ -103,8 +103,13 @@ YORKIE_HA_STREAM_AUTH_MODE=bearer
 YORKIE_STREAM_FRAME_INTERVAL=5
 YORKIE_STREAM_RECONNECT_SECONDS=5
 YORKIE_STREAM_MAX_FAILURES=0
-YORKIE_STREAM_SAVE_DEBUG_FRAMES=1
+YORKIE_STREAM_KEEP_FRAMES=0
+YORKIE_STREAM_SAVE_DEBUG_FRAMES=0
 YORKIE_STREAM_DEBUG_DIR=data/stream_frames
+YORKIE_STREAM_RETENTION_MINUTES=60
+YORKIE_STREAM_MAX_FRAME_FILES=500
+YORKIE_DEBUG_CROP_RETENTION_MINUTES=60
+YORKIE_DEBUG_CROP_MAX_FILES=500
 YORKIE_STREAM_ALERT_COOLDOWN_SECONDS=300
 YORKIE_STREAM_PYTHON=python3
 ```
@@ -296,7 +301,7 @@ Run a bounded stream test and keep its sampled frames:
 python -m yorkie_watch.main --watch-stream --stream-frames 3 --stream-save-debug-frame
 ```
 
-`YORKIE_STREAM_ALERT_COOLDOWN_SECONDS` applies the live-stream alert cooldown. `YORKIE_STREAM_SAVE_DEBUG_FRAMES=1` keeps sampled stream JPGs by default for inspection; set it to `0` to remove sampled frames after each scan. Generated stream frames stay under ignored image paths and must not be committed.
+`YORKIE_STREAM_ALERT_COOLDOWN_SECONDS` applies the live-stream alert cooldown. By default, `YORKIE_STREAM_KEEP_FRAMES=0` and `YORKIE_STREAM_SAVE_DEBUG_FRAMES=0` delete each sampled stream JPG after it has been scanned, unless it was sent as the alert attachment. Set either value to `1` only for local debugging. Startup, periodic stream-loop, and bounded-test cleanup remove old `data/stream_frames/` and `data/debug_crops/` images by `YORKIE_STREAM_RETENTION_MINUTES`, `YORKIE_STREAM_MAX_FRAME_FILES`, `YORKIE_DEBUG_CROP_RETENTION_MINUTES`, and `YORKIE_DEBUG_CROP_MAX_FILES`. Cleanup is limited to project `data/` image directories, and generated camera frames/crops must not be committed.
 
 You can also use the installed console script:
 

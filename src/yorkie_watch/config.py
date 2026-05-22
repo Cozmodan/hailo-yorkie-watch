@@ -93,8 +93,13 @@ class StreamConfig:
     frame_interval_seconds: float
     reconnect_seconds: float
     max_failures: int
+    keep_frames: bool
     save_debug_frames: bool
     debug_dir: str
+    retention_minutes: float
+    max_frame_files: int
+    debug_crop_retention_minutes: float
+    debug_crop_max_files: int
     alert_cooldown_seconds: float
     python_executable: str
 
@@ -291,8 +296,13 @@ def load_stream_config() -> StreamConfig:
         frame_interval_seconds=max(0.0, get_float_env("YORKIE_STREAM_FRAME_INTERVAL", 5.0)),
         reconnect_seconds=max(0.0, get_float_env("YORKIE_STREAM_RECONNECT_SECONDS", 5.0)),
         max_failures=max(0, get_int_env("YORKIE_STREAM_MAX_FAILURES", 0)),
-        save_debug_frames=get_bool_env("YORKIE_STREAM_SAVE_DEBUG_FRAMES", True),
+        keep_frames=get_bool_env("YORKIE_STREAM_KEEP_FRAMES", False),
+        save_debug_frames=get_bool_env("YORKIE_STREAM_SAVE_DEBUG_FRAMES", False),
         debug_dir=get_env("YORKIE_STREAM_DEBUG_DIR", "data/stream_frames") or "data/stream_frames",
+        retention_minutes=max(0.0, get_float_env("YORKIE_STREAM_RETENTION_MINUTES", 60.0)),
+        max_frame_files=max(0, get_int_env("YORKIE_STREAM_MAX_FRAME_FILES", 500)),
+        debug_crop_retention_minutes=max(0.0, get_float_env("YORKIE_DEBUG_CROP_RETENTION_MINUTES", 60.0)),
+        debug_crop_max_files=max(0, get_int_env("YORKIE_DEBUG_CROP_MAX_FILES", 500)),
         alert_cooldown_seconds=max(0.0, get_float_env("YORKIE_STREAM_ALERT_COOLDOWN_SECONDS", 300.0)),
         python_executable=get_env("YORKIE_STREAM_PYTHON", "python3") or "python3",
     )

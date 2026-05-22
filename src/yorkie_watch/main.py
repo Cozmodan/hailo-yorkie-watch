@@ -17,6 +17,7 @@ from .config import (
     load_stream_config,
     load_watch_config,
 )
+from .cleanup import cleanup_stream_artifacts
 from .detector import COCO_DOG_CLASS_ID, DetectionResult, DetectorError, create_detector, print_result
 from .ha_client import HomeAssistantClient, HomeAssistantError
 from .openclaw_client import OpenClawClient
@@ -25,6 +26,7 @@ from .stream_source import StreamFrameSource, StreamSourceError, create_stream_s
 
 LOGGER = logging.getLogger(__name__)
 SNAPSHOT_DIR = Path("data") / "snapshots"
+STREAM_CLEANUP_EVERY_FRAMES = 10
 
 
 @dataclass
@@ -254,8 +256,10 @@ def run_watch_stream(*, max_frames: int | None = None, keep_debug_frame: bool = 
             scan_frame=scan_frame,
             notify_alert=notify_alert,
             max_frames=max_frames or 0,
+            cleanup_artifacts=lambda: cleanup_stream_artifacts(stream_config),
         )
     except KeyboardInterrupt:
+        cleanup_stream_artifacts(stream_config)
         LOGGER.info("Live stream watch mode stopped.")
         print("Live stream watch mode stopped.")
         return 0
@@ -277,21 +281,26 @@ def run_stream_watch_loop(
     max_frames: int = 0,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
+    cleanup_artifacts: Callable[[], object] | None = None,
+    cleanup_every_frames: int = STREAM_CLEANUP_EVERY_FRAMES,
 ) -> StreamWatchState:
     """Run stream reconnect, scan, notification, and cooldown behavior."""
     state = StreamWatchState()
+    if cleanup_artifacts is not None:
+        cleanup_artifacts()
     while max_frames == 0 or state.sampled_frames < max_frames:
         try:
             with source_factory() as source:
                 for frame_path in source:
                     state.sampled_frames += 1
                     LOGGER.info("Stream frame sampled: %s", frame_path)
+                    alert_sent = False
                     try:
                         result = scan_frame(frame_path)
                     except DetectorError as exc:
                         LOGGER.warning("Stream detector failed: %s", exc)
                     else:
-                        _handle_stream_scan_result(
+                        alert_sent = _handle_stream_scan_result(
                             frame_path=frame_path,
                             result=result,
                             state=state,
@@ -300,10 +309,19 @@ def run_stream_watch_loop(
                             alert_time=clock(),
                         )
                     finally:
-                        if not config.save_debug_frames:
+                        if _delete_processed_stream_frame(config=config, alert_sent=alert_sent):
                             frame_path.unlink(missing_ok=True)
+                            LOGGER.debug("Deleted processed stream frame: %s", frame_path)
+                        if (
+                            cleanup_artifacts is not None
+                            and cleanup_every_frames > 0
+                            and state.sampled_frames % cleanup_every_frames == 0
+                        ):
+                            cleanup_artifacts()
 
                     if max_frames and state.sampled_frames >= max_frames:
+                        if cleanup_artifacts is not None:
+                            cleanup_artifacts()
                         return state
         except StreamSourceError as exc:
             state.failures += 1
@@ -473,20 +491,25 @@ def _handle_stream_scan_result(
     config: StreamConfig,
     notify_alert: Callable[[Path, DetectionResult], bool],
     alert_time: float,
-) -> None:
+) -> bool:
     if not result.matched:
         LOGGER.info("stream no alert: %s", result.matched_reason)
-        return
+        return False
 
     LOGGER.info("Stream detector matched: %s", result.matched_reason)
     if state.last_alert_at is not None and alert_time - state.last_alert_at < config.alert_cooldown_seconds:
         LOGGER.info("stream alert matched but cooldown active; no message sent")
-        return
+        return False
 
     if notify_alert(frame_path, result):
         state.last_alert_at = alert_time
-        return
+        return True
     LOGGER.warning("Stream alert condition matched, but notification was not sent.")
+    return False
+
+
+def _delete_processed_stream_frame(*, config: StreamConfig, alert_sent: bool) -> bool:
+    return not (config.keep_frames or config.save_debug_frames or alert_sent)
 
 
 def _detection_summary(result: DetectionResult) -> str:
