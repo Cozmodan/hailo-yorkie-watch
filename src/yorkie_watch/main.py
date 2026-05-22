@@ -8,11 +8,20 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
-from .config import ConfigError, WatchConfig, load_detector_config, load_scan_config, load_watch_config
+from .config import (
+    ConfigError,
+    StreamConfig,
+    WatchConfig,
+    load_detector_config,
+    load_scan_config,
+    load_stream_config,
+    load_watch_config,
+)
 from .detector import COCO_DOG_CLASS_ID, DetectionResult, DetectorError, create_detector, print_result
 from .ha_client import HomeAssistantClient, HomeAssistantError
 from .openclaw_client import OpenClawClient
 from .scanner import best_crop_path, best_dog_confidence, scan_confirmed_snapshots, scan_image, scanner_summary
+from .stream_source import StreamFrameSource, StreamSourceError, create_stream_source
 
 LOGGER = logging.getLogger(__name__)
 SNAPSHOT_DIR = Path("data") / "snapshots"
@@ -27,11 +36,21 @@ class WatchState:
     last_snapshot_path: Path | None = None
 
 
+@dataclass
+class StreamWatchState:
+    """In-memory state for one continuous stream watch process."""
+
+    sampled_frames: int = 0
+    failures: int = 0
+    last_alert_at: float | None = None
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Hailo Yorkie Watch plumbing CLI")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--once", action="store_true", help="Fetch one Home Assistant snapshot and save it locally.")
     mode.add_argument("--watch", action="store_true", help="Continuously scan Home Assistant snapshots for alerts.")
+    mode.add_argument("--watch-stream", action="store_true", help="Continuously scan sampled live stream frames for alerts.")
     mode.add_argument("--test-openclaw", action="store_true", help="Send one test event to OpenClaw.")
     mode.add_argument("--test-detect", metavar="IMAGE", help="Run detector once against an existing image.")
     mode.add_argument(
@@ -44,6 +63,17 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="N",
         type=int,
         help="Override YORKIE_WATCH_MAX_ITERATIONS for bounded watch-mode test runs.",
+    )
+    parser.add_argument(
+        "--stream-frames",
+        metavar="N",
+        type=int,
+        help="Stop live stream watch mode after N sampled frames.",
+    )
+    parser.add_argument(
+        "--stream-save-debug-frame",
+        action="store_true",
+        help="Keep sampled live stream frames for this run.",
     )
     return parser
 
@@ -195,6 +225,99 @@ def run_watch_loop(
     return state
 
 
+def run_watch_stream(*, max_frames: int | None = None, keep_debug_frame: bool = False) -> int:
+    """Continuously scan sampled live stream frames until stopped or limited."""
+    if max_frames is not None and max_frames < 0:
+        raise ValueError("--stream-frames must be zero or greater.")
+
+    stream_config = load_stream_config()
+    if keep_debug_frame:
+        stream_config = replace(stream_config, save_debug_frames=True)
+
+    detector = create_detector(load_detector_config())
+    scan_config = load_scan_config()
+    notifier: OpenClawClient | None = None
+
+    def scan_frame(frame_path: Path) -> DetectionResult:
+        return scan_image(frame_path, detector=detector, config=scan_config).result
+
+    def notify_alert(frame_path: Path, result: DetectionResult) -> bool:
+        nonlocal notifier
+        notifier = notifier or OpenClawClient.from_env()
+        return _notify_detection_result(frame_path, result, notifier=notifier)
+
+    LOGGER.info("Starting live stream watch mode.")
+    try:
+        state = run_stream_watch_loop(
+            config=stream_config,
+            source_factory=lambda: create_stream_source(stream_config),
+            scan_frame=scan_frame,
+            notify_alert=notify_alert,
+            max_frames=max_frames or 0,
+        )
+    except KeyboardInterrupt:
+        LOGGER.info("Live stream watch mode stopped.")
+        print("Live stream watch mode stopped.")
+        return 0
+
+    LOGGER.info(
+        "Live stream watch mode finished after %d sampled frame(s) and %d stream failure(s).",
+        state.sampled_frames,
+        state.failures,
+    )
+    return 0
+
+
+def run_stream_watch_loop(
+    *,
+    config: StreamConfig,
+    source_factory: Callable[[], StreamFrameSource],
+    scan_frame: Callable[[Path], DetectionResult],
+    notify_alert: Callable[[Path, DetectionResult], bool],
+    max_frames: int = 0,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> StreamWatchState:
+    """Run stream reconnect, scan, notification, and cooldown behavior."""
+    state = StreamWatchState()
+    while max_frames == 0 or state.sampled_frames < max_frames:
+        try:
+            with source_factory() as source:
+                for frame_path in source:
+                    state.sampled_frames += 1
+                    LOGGER.info("Stream frame sampled: %s", frame_path)
+                    try:
+                        result = scan_frame(frame_path)
+                    except DetectorError as exc:
+                        LOGGER.warning("Stream detector failed: %s", exc)
+                    else:
+                        _handle_stream_scan_result(
+                            frame_path=frame_path,
+                            result=result,
+                            state=state,
+                            config=config,
+                            notify_alert=notify_alert,
+                            alert_time=clock(),
+                        )
+                    finally:
+                        if not config.save_debug_frames:
+                            frame_path.unlink(missing_ok=True)
+
+                    if max_frames and state.sampled_frames >= max_frames:
+                        return state
+        except StreamSourceError as exc:
+            state.failures += 1
+            LOGGER.warning("Stream failure: %s", exc)
+            if config.max_failures and state.failures >= config.max_failures:
+                LOGGER.error("Stream failure limit reached after %d failure(s).", state.failures)
+                return state
+            LOGGER.info("Reconnecting stream after %.1f second(s).", config.reconnect_seconds)
+            if config.reconnect_seconds > 0:
+                sleep(config.reconnect_seconds)
+
+    return state
+
+
 def run_test_openclaw() -> int:
     client = OpenClawClient.from_env()
     if client.notify_mode == "disabled":
@@ -342,6 +465,30 @@ def _watch_iteration_finished(
         sleep(config.interval_seconds)
 
 
+def _handle_stream_scan_result(
+    *,
+    frame_path: Path,
+    result: DetectionResult,
+    state: StreamWatchState,
+    config: StreamConfig,
+    notify_alert: Callable[[Path, DetectionResult], bool],
+    alert_time: float,
+) -> None:
+    if not result.matched:
+        LOGGER.info("stream no alert: %s", result.matched_reason)
+        return
+
+    LOGGER.info("Stream detector matched: %s", result.matched_reason)
+    if state.last_alert_at is not None and alert_time - state.last_alert_at < config.alert_cooldown_seconds:
+        LOGGER.info("stream alert matched but cooldown active; no message sent")
+        return
+
+    if notify_alert(frame_path, result):
+        state.last_alert_at = alert_time
+        return
+    LOGGER.warning("Stream alert condition matched, but notification was not sent.")
+
+
 def _detection_summary(result: DetectionResult) -> str:
     if not result.ok:
         return f"detector failed: {result.error or result.matched_reason}"
@@ -367,13 +514,15 @@ def main() -> int:
             return run_once()
         if args.watch:
             return run_watch(max_iterations=args.watch_iterations)
+        if args.watch_stream:
+            return run_watch_stream(max_frames=args.stream_frames, keep_debug_frame=args.stream_save_debug_frame)
         if args.test_openclaw:
             return run_test_openclaw()
         if args.test_detect:
             return run_test_detect(args.test_detect)
         if args.what_see:
             return run_what_see()
-    except (ConfigError, DetectorError, HomeAssistantError, ValueError) as exc:
+    except (ConfigError, DetectorError, HomeAssistantError, StreamSourceError, ValueError) as exc:
         LOGGER.error("%s", exc)
         return 1
 

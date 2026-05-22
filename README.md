@@ -6,6 +6,7 @@ This first milestone implements plumbing plus an optional dog-detection stage:
 
 - Fetch one snapshot from a Home Assistant camera proxy endpoint.
 - Save local test snapshots under `data/snapshots/`.
+- Optionally sample frames from a configured live camera stream.
 - Optionally run a Hailo Apps object detector against the saved snapshot.
 - Send a WhatsApp notification through OpenClaw only when the configured detection condition matches.
 - Provide a small command-line entry point.
@@ -89,6 +90,17 @@ YORKIE_WATCH_SEND_NO_MATCH_LOG=1
 YORKIE_WATCH_HEARTBEAT_EVERY=0
 YORKIE_WATCH_REUSE_LAST_SNAPSHOT_ON_HA_FAIL=0
 YORKIE_WATCH_STOP_ON_ERROR=0
+
+YORKIE_STREAM_ENABLED=0
+YORKIE_STREAM_URL=<camera-stream-url>
+YORKIE_STREAM_BACKEND=opencv
+YORKIE_STREAM_FRAME_INTERVAL=5
+YORKIE_STREAM_RECONNECT_SECONDS=5
+YORKIE_STREAM_MAX_FAILURES=0
+YORKIE_STREAM_SAVE_DEBUG_FRAMES=1
+YORKIE_STREAM_DEBUG_DIR=data/stream_frames
+YORKIE_STREAM_ALERT_COOLDOWN_SECONDS=300
+YORKIE_STREAM_PYTHON=python3
 ```
 
 Do not put real values in committed files. Keep real URLs, hostnames, tokens, camera entity names, and WhatsApp targets in your local `.env` only.
@@ -106,6 +118,8 @@ Snapshot attachments over SSH are opt-in because OpenClaw media CLI syntax must 
 `YORKIE_DETECTOR_ENABLED` defaults to `0`, so `--once` still only saves a Home Assistant snapshot unless you opt in to detection. The default detector backend is `hailo_apps`, using `/usr/share/hailo-models/yolov8m_h10.hef`, `dog,person` as requested detector classes, `0.35` as the full-frame dog confidence, and `0.20` as the crop/zoom dog confidence.
 
 `YORKIE_HAILO_APPS_ROOT` should point to the installed `hailo-apps` checkout on the Pi. `YORKIE_HAILO_PYTHON` defaults to `python3` so the detector subprocess can use system Hailo packages outside this project virtual environment. `YORKIE_HAILO_DETECT_COMMAND` is optional; leave it empty to use the repo wrapper, or set it to a JSON-emitting command template with `{image}`, `{hef}`, `{hailo_apps_root}`, `{threshold}`, and `{classes}` placeholders after verifying a custom Hailo command.
+
+`YORKIE_STREAM_ENABLED` defaults to `0`. Live stream mode reads `YORKIE_STREAM_URL` only from runtime environment, samples JPEG frames with the `opencv` stream backend, and feeds those frame paths through the same scanner and Hailo detector flow. `YORKIE_STREAM_PYTHON` defaults to `python3` so OpenCV capture can run in a system Python helper when this project virtual environment does not provide `cv2`.
 
 ## Multi-stage night scanner
 
@@ -238,6 +252,22 @@ python -m yorkie_watch.main --watch --watch-iterations 2
 ```
 
 An empty or zero `YORKIE_WATCH_MAX_ITERATIONS` runs forever. `YORKIE_WATCH_SEND_NO_MATCH_LOG=1` logs no-alert scans. `YORKIE_WATCH_HEARTBEAT_EVERY=0` disables heartbeat WhatsApp messages; set a positive iteration count to opt in. `YORKIE_WATCH_REUSE_LAST_SNAPSHOT_ON_HA_FAIL=0` keeps failed Home Assistant fetches from scanning stale images by default.
+
+Watch a live camera stream instead of requesting Home Assistant snapshots:
+
+```powershell
+python -m yorkie_watch.main --watch-stream
+```
+
+Stream watch mode is opt-in: set `YORKIE_STREAM_ENABLED=1` and put the real stream URL in local `.env` only. The OpenCV helper reads frames continuously, saves one sampled frame every `YORKIE_STREAM_FRAME_INTERVAL` seconds under `YORKIE_STREAM_DEBUG_DIR`, runs the existing multi-stage scanner on that JPEG, and sends the sampled frame as the alert attachment when the detector condition matches. It reconnects after stream failures using `YORKIE_STREAM_RECONNECT_SECONDS`; `YORKIE_STREAM_MAX_FAILURES=0` leaves reconnect attempts unlimited.
+
+Run a bounded stream test and keep its sampled frames:
+
+```powershell
+python -m yorkie_watch.main --watch-stream --stream-frames 3 --stream-save-debug-frame
+```
+
+`YORKIE_STREAM_ALERT_COOLDOWN_SECONDS` applies the live-stream alert cooldown. `YORKIE_STREAM_SAVE_DEBUG_FRAMES=1` keeps sampled stream JPGs by default for inspection; set it to `0` to remove sampled frames after each scan. Generated stream frames stay under ignored image paths and must not be committed.
 
 You can also use the installed console script:
 

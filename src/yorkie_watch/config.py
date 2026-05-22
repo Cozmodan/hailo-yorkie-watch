@@ -77,6 +77,22 @@ class WatchConfig:
     stop_on_error: bool
 
 
+@dataclass(frozen=True)
+class StreamConfig:
+    """Runtime settings for live camera stream watch mode."""
+
+    enabled: bool
+    url: str
+    backend: str
+    frame_interval_seconds: float
+    reconnect_seconds: float
+    max_failures: int
+    save_debug_frames: bool
+    debug_dir: str
+    alert_cooldown_seconds: float
+    python_executable: str
+
+
 def load_environment(env_path: str | Path | None = None) -> None:
     """Load environment variables from `.env` without overriding existing values."""
     loaded = load_dotenv(dotenv_path=env_path, override=False)
@@ -250,4 +266,21 @@ def load_watch_config() -> WatchConfig:
         heartbeat_every=max(0, get_int_env("YORKIE_WATCH_HEARTBEAT_EVERY", 0)),
         reuse_last_snapshot_on_ha_fail=get_bool_env("YORKIE_WATCH_REUSE_LAST_SNAPSHOT_ON_HA_FAIL", False),
         stop_on_error=get_bool_env("YORKIE_WATCH_STOP_ON_ERROR", False),
+    )
+
+
+def load_stream_config() -> StreamConfig:
+    """Load live camera stream settings from `.env` / process environment."""
+    load_environment()
+    return StreamConfig(
+        enabled=get_bool_env("YORKIE_STREAM_ENABLED", False),
+        url=get_env("YORKIE_STREAM_URL"),
+        backend=(get_env("YORKIE_STREAM_BACKEND", "opencv") or "opencv").lower(),
+        frame_interval_seconds=max(0.0, get_float_env("YORKIE_STREAM_FRAME_INTERVAL", 5.0)),
+        reconnect_seconds=max(0.0, get_float_env("YORKIE_STREAM_RECONNECT_SECONDS", 5.0)),
+        max_failures=max(0, get_int_env("YORKIE_STREAM_MAX_FAILURES", 0)),
+        save_debug_frames=get_bool_env("YORKIE_STREAM_SAVE_DEBUG_FRAMES", True),
+        debug_dir=get_env("YORKIE_STREAM_DEBUG_DIR", "data/stream_frames") or "data/stream_frames",
+        alert_cooldown_seconds=max(0.0, get_float_env("YORKIE_STREAM_ALERT_COOLDOWN_SECONDS", 300.0)),
+        python_executable=get_env("YORKIE_STREAM_PYTHON", "python3") or "python3",
     )

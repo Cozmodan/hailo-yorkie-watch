@@ -18,6 +18,7 @@ venv/
 
 # Runtime snapshots and real camera images
 data/snapshots/*
+data/stream_frames/*
 *.jpg
 *.jpeg
 *.png
