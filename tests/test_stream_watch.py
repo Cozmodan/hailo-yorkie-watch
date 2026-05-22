@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -365,6 +366,52 @@ class StreamWatchTests(unittest.TestCase):
         self.assertNotIn("-vf", run.call_args.args[0])
         self.assertEqual(len(lines), 3)
         self.assertIn('"frame_index": 3', lines[-1])
+
+    def test_ffmpeg_helper_bounded_capture_collects_partial_batches(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = StringIO()
+            first_pattern = Path(temp_dir) / "first_%06d.jpg"
+            second_pattern = Path(temp_dir) / "second_%06d.jpg"
+            (Path(temp_dir) / "first_000001.jpg").write_bytes(b"jpeg")
+            (Path(temp_dir) / "first_000002.jpg").write_bytes(b"jpeg")
+            (Path(temp_dir) / "second_000001.jpg").write_bytes(b"jpeg")
+
+            with (
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "ffmpeg_stream_frames.py",
+                        "--url",
+                        "http://<home-assistant-host>:8123/api/camera_proxy_stream/camera.placeholder",
+                        "--output-dir",
+                        temp_dir,
+                        "--frames",
+                        "3",
+                    ],
+                ),
+                patch(
+                    "scripts.ffmpeg_stream_frames.build_output_pattern",
+                    side_effect=[first_pattern, second_pattern],
+                ),
+                patch(
+                    "scripts.ffmpeg_stream_frames.subprocess.run",
+                    side_effect=[Mock(returncode=0, stderr=""), Mock(returncode=0, stderr="")],
+                ) as run,
+                redirect_stdout(output),
+            ):
+                returncode = ffmpeg_helper.main()
+
+        events = [json.loads(line) for line in output.getvalue().splitlines()]
+        frame_events = [event for event in events if event["type"] == "frame"]
+        self.assertEqual(returncode, 0)
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual([event["frame_index"] for event in frame_events], [1, 2, 3])
+        self.assertFalse([event for event in events if event["type"] == "error"])
+        first_argv = run.call_args_list[0].args[0]
+        second_argv = run.call_args_list[1].args[0]
+        self.assertEqual(first_argv[first_argv.index("-frames:v") + 1], "3")
+        self.assertEqual(second_argv[second_argv.index("-frames:v") + 1], "1")
 
     def test_ffmpeg_helper_bounded_no_output_error_is_clear_and_redacted(self) -> None:
         token = "<ha-long-lived-token>"

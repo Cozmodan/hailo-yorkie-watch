@@ -9,6 +9,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 POLL_SECONDS = 0.1
 STABLE_CHECK_SECONDS = 0.02
@@ -34,7 +35,7 @@ def emit(event: dict[str, Any]) -> None:
 
 
 def build_output_pattern(output_dir: Path) -> Path:
-    run_id = datetime.now().strftime("stream_%Y%m%d_%H%M%S_%f")
+    run_id = f"{datetime.now().strftime('stream_%Y%m%d_%H%M%S_%f')}_{uuid4().hex[:8]}"
     return output_dir / f"{run_id}_%06d.jpg"
 
 
@@ -159,6 +160,49 @@ def emit_frame_count_error(
     )
 
 
+def bounded_max_attempts(frames: int) -> int:
+    """Limit finite reconnect capture attempts for short Home Assistant streams."""
+    return max(3, frames * 2)
+
+
+def emit_attempt_limit_error(
+    *,
+    backend: str,
+    output_pattern: Path,
+    attempt_count: int,
+    found_count: int,
+    emitted_count: int,
+    requested_count: int,
+    stderr: str,
+    stream_url: str,
+    bearer_token: str,
+) -> None:
+    """Emit one redacted error when bounded capture stays short after retries."""
+    expected_glob = redact_error(output_glob(output_pattern), stream_url=stream_url, bearer_token=bearer_token)
+    safe_stderr = redact_error(stderr.strip(), stream_url=stream_url, bearer_token=bearer_token)
+    detail = (
+        f"bounded ffmpeg capture reached max attempts before requested output frame count was found; "
+        f"attempt_count={attempt_count}; expected_glob={expected_glob!r}; found_count={found_count}; "
+        f"emitted_count={emitted_count}; requested_count={requested_count}"
+    )
+    if safe_stderr:
+        detail = f"{detail}; stderr={safe_stderr}"
+    emit(
+        {
+            "type": "error",
+            "ok": False,
+            "source": "ffmpeg",
+            "backend": backend,
+            "error": detail,
+            "attempt_count": attempt_count,
+            "expected_glob": expected_glob,
+            "found_count": found_count,
+            "emitted_count": emitted_count,
+            "requested_count": requested_count,
+        }
+    )
+
+
 def start_ffmpeg(
     *,
     stream_url: str,
@@ -275,8 +319,16 @@ def stop_process(process: subprocess.Popen[str]) -> None:
         process.wait(timeout=5)
 
 
-def emit_batch_frames(output_pattern: Path, *, backend: str, start_index: int = 0) -> list[Path]:
+def emit_batch_frames(
+    output_pattern: Path,
+    *,
+    backend: str,
+    start_index: int = 0,
+    max_frames: int = 0,
+) -> list[Path]:
     batch_paths = frame_paths(output_pattern)
+    if max_frames > 0:
+        batch_paths = batch_paths[:max_frames]
     for frame_index, frame_path in enumerate(batch_paths, start=start_index + 1):
         emit_frame(frame_path, frame_index=frame_index, backend=backend)
     return batch_paths
@@ -290,41 +342,84 @@ def run_bounded_capture(
     bearer_token: str,
     backend: str,
 ) -> int:
-    output_pattern = build_output_pattern(output_dir)
     emit({"type": "connected", "ok": True, "source": "ffmpeg", "backend": backend})
-    completed = run_ffmpeg_batch(
-        stream_url=stream_url,
-        output_pattern=output_pattern,
-        frames=frames,
-        bearer_token=bearer_token,
-        backend=backend,
-    )
-    if completed is None:
-        return 3
-    if completed.returncode != 0:
-        emit_process_error(
+    emitted_count = 0
+    last_found_count = 0
+    last_stderr = ""
+    last_output_pattern: Path | None = None
+    max_attempts = bounded_max_attempts(frames)
+    for attempt in range(1, max_attempts + 1):
+        output_pattern = build_output_pattern(output_dir)
+        last_output_pattern = output_pattern
+        completed = run_ffmpeg_batch(
+            stream_url=stream_url,
+            output_pattern=output_pattern,
+            frames=frames - emitted_count,
+            bearer_token=bearer_token,
             backend=backend,
-            returncode=completed.returncode,
-            stderr=completed.stderr,
+        )
+        if completed is None:
+            return 3
+
+        last_stderr = completed.stderr
+        batch_paths = emit_batch_frames(
+            output_pattern,
+            backend=backend,
+            start_index=emitted_count,
+            max_frames=frames - emitted_count,
+        )
+        last_found_count = len(batch_paths)
+        emitted_count += last_found_count
+        if emitted_count >= frames:
+            return 0
+        if not batch_paths:
+            if completed.returncode != 0:
+                emit_process_error(
+                    backend=backend,
+                    returncode=completed.returncode,
+                    stderr=completed.stderr,
+                    stream_url=stream_url,
+                    bearer_token=bearer_token,
+                )
+                return 4
+            emit_frame_count_error(
+                backend=backend,
+                output_pattern=output_pattern,
+                found_count=0,
+                emitted_count=emitted_count,
+                requested_count=frames,
+                stderr=completed.stderr,
+                stream_url=stream_url,
+                bearer_token=bearer_token,
+            )
+            return 5
+        if attempt == max_attempts:
+            emit_attempt_limit_error(
+                backend=backend,
+                output_pattern=output_pattern,
+                attempt_count=attempt,
+                found_count=last_found_count,
+                emitted_count=emitted_count,
+                requested_count=frames,
+                stderr=completed.stderr,
+                stream_url=stream_url,
+                bearer_token=bearer_token,
+            )
+            return 6
+
+    if last_output_pattern is not None:
+        emit_attempt_limit_error(
+            backend=backend,
+            output_pattern=last_output_pattern,
+            attempt_count=max_attempts,
+            found_count=last_found_count,
+            emitted_count=emitted_count,
+            requested_count=frames,
+            stderr=last_stderr,
             stream_url=stream_url,
             bearer_token=bearer_token,
         )
-        return 4
-
-    batch_paths = emit_batch_frames(output_pattern, backend=backend)
-    if len(batch_paths) >= frames:
-        return 0
-    emit_frame_count_error(
-        backend=backend,
-        output_pattern=output_pattern,
-        found_count=len(batch_paths),
-        emitted_count=len(batch_paths),
-        requested_count=frames,
-        stderr=completed.stderr,
-        stream_url=stream_url,
-        bearer_token=bearer_token,
-    )
-    return 5
+    return 6
 
 
 def no_output_timeout(frame_interval: float) -> float:
