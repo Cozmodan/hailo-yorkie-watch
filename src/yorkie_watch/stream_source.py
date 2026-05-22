@@ -34,8 +34,9 @@ class StreamFrameSource(Protocol):
 class OpenCVSubprocessFrameSource:
     """Use a Python/OpenCV helper process to sample frames from a live stream."""
 
-    def __init__(self, config: StreamConfig) -> None:
+    def __init__(self, config: StreamConfig, *, frame_limit: int = 0) -> None:
         self.config = config
+        self.frame_limit = max(0, frame_limit)
         self.stream_url = resolve_stream_url(config)
         self.process: subprocess.Popen[str] | None = None
 
@@ -125,8 +126,8 @@ class OpenCVSubprocessFrameSource:
 class FFmpegSubprocessFrameSource(OpenCVSubprocessFrameSource):
     """Use an ffmpeg helper for Home Assistant authenticated camera streams."""
 
-    def __init__(self, config: StreamConfig) -> None:
-        super().__init__(config)
+    def __init__(self, config: StreamConfig, *, frame_limit: int = 0) -> None:
+        super().__init__(config, frame_limit=frame_limit)
         self.bearer_token = home_assistant_bearer_token(config)
 
     def _build_helper_argv(self) -> list[str]:
@@ -145,18 +146,20 @@ class FFmpegSubprocessFrameSource(OpenCVSubprocessFrameSource):
         ]
         if self.bearer_token:
             argv.extend(["--bearer-token", self.bearer_token])
+        if self.frame_limit:
+            argv.extend(["--frames", str(self.frame_limit)])
         return argv
 
 
-def create_stream_source(config: StreamConfig) -> StreamFrameSource:
+def create_stream_source(config: StreamConfig, *, frame_limit: int = 0) -> StreamFrameSource:
     """Create the configured live stream frame source."""
     if not config.enabled:
         raise ConfigError("YORKIE_STREAM_ENABLED=1 is required for --watch-stream.")
     if config.backend not in SUPPORTED_STREAM_BACKENDS:
         raise ValueError(f"YORKIE_STREAM_BACKEND must be one of: {', '.join(sorted(SUPPORTED_STREAM_BACKENDS))}")
     if uses_home_assistant_stream(config):
-        return FFmpegSubprocessFrameSource(config)
-    return OpenCVSubprocessFrameSource(config)
+        return FFmpegSubprocessFrameSource(config, frame_limit=frame_limit)
+    return OpenCVSubprocessFrameSource(config, frame_limit=frame_limit)
 
 
 def resolve_stream_url(config: StreamConfig) -> str:

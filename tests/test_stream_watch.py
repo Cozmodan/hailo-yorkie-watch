@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
@@ -19,7 +22,7 @@ from yorkie_watch.stream_source import (  # noqa: E402
     redact_stream_output,
     resolve_stream_url,
 )
-from scripts.ffmpeg_stream_frames import build_ffmpeg_argv  # noqa: E402
+from scripts import ffmpeg_stream_frames as ffmpeg_helper  # noqa: E402
 
 
 def stream_config(**overrides: object) -> StreamConfig:
@@ -186,10 +189,9 @@ class StreamWatchTests(unittest.TestCase):
         )
 
         helper_argv = source._build_helper_argv()
-        ffmpeg_argv = build_ffmpeg_argv(
+        ffmpeg_argv = ffmpeg_helper.build_ffmpeg_argv(
             stream_url=source.stream_url,
-            output_pattern="data/stream_frames/frame_%08d.jpg",
-            frame_interval=5.0,
+            output_file="data/stream_frames/frame.jpg",
             bearer_token=token,
         )
 
@@ -283,6 +285,118 @@ class StreamWatchTests(unittest.TestCase):
             create_stream_source(stream_config(url="rtsp://<camera-stream-host>/<placeholder>")),
             OpenCVSubprocessFrameSource,
         )
+
+    def test_ffmpeg_helper_accepts_frame_limit(self) -> None:
+        args = ffmpeg_helper.build_parser().parse_args(
+            [
+                "--url",
+                "http://<home-assistant-host>:8123/api/camera_proxy_stream/camera.placeholder",
+                "--output-dir",
+                "data/stream_frames",
+                "--frames",
+                "3",
+            ]
+        )
+
+        self.assertEqual(args.frames, 3)
+
+    def test_ffmpeg_helper_success_emits_frame_lines_immediately(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = StringIO()
+
+            def fake_run(argv: list[str], **_kwargs: object):
+                Path(argv[-1]).write_bytes(b"jpeg")
+                return Mock(returncode=0, stderr="")
+
+            with (
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "ffmpeg_stream_frames.py",
+                        "--url",
+                        "http://<home-assistant-host>:8123/api/camera_proxy_stream/camera.placeholder",
+                        "--output-dir",
+                        temp_dir,
+                        "--frame-interval",
+                        "0",
+                        "--frames",
+                        "3",
+                    ],
+                ),
+                patch("scripts.ffmpeg_stream_frames.subprocess.run", side_effect=fake_run),
+                redirect_stdout(output),
+            ):
+                returncode = ffmpeg_helper.main()
+
+        lines = [line for line in output.getvalue().splitlines() if '"type": "frame"' in line]
+        self.assertEqual(returncode, 0)
+        self.assertEqual(len(lines), 3)
+        self.assertIn('"frame_index": 3', lines[-1])
+
+    def test_ffmpeg_helper_failure_emits_redacted_error(self) -> None:
+        token = "<ha-long-lived-token>"
+        url = "http://<home-assistant-host>:8123/api/camera_proxy_stream/camera.placeholder?token=<query-token>"
+        output = StringIO()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "ffmpeg_stream_frames.py",
+                        "--url",
+                        url,
+                        "--output-dir",
+                        temp_dir,
+                        "--frames",
+                        "1",
+                        "--bearer-token",
+                        token,
+                    ],
+                ),
+                patch(
+                    "scripts.ffmpeg_stream_frames.subprocess.run",
+                    return_value=Mock(
+                        returncode=8,
+                        stderr=f"Authorization: Bearer {token}\nfailed opening {url}",
+                    ),
+                ),
+                redirect_stdout(output),
+            ):
+                returncode = ffmpeg_helper.main()
+
+        text = output.getvalue()
+        self.assertNotEqual(returncode, 0)
+        self.assertIn('"type": "error"', text)
+        self.assertIn("returncode=8", text)
+        self.assertNotIn(token, text)
+        self.assertNotIn(url, text)
+        self.assertNotIn("<query-token>", text)
+        self.assertNotIn(f"Authorization: Bearer {token}", text)
+
+    def test_stream_frame_limit_is_passed_to_ffmpeg_helper_and_loop_finishes(self) -> None:
+        config = stream_config(
+            url="",
+            backend="home_assistant",
+            use_home_assistant=True,
+            ha_base_url="http://<home-assistant-host>:8123",
+            ha_stream_entity="camera.<placeholder>",
+            ha_long_lived_token="<ha-long-lived-token>",
+        )
+        source = create_stream_source(config, frame_limit=3)
+
+        state = run_stream_watch_loop(
+            config=config,
+            source_factory=lambda: FakeFrameSource([Path("frame-1.jpg"), Path("frame-2.jpg"), Path("frame-3.jpg")]),
+            scan_frame=lambda frame_path: scan_result(frame_path, matched=False),
+            notify_alert=lambda _frame_path, _result: True,
+            max_frames=3,
+        )
+
+        self.assertIn("--frames", source._build_helper_argv())  # type: ignore[attr-defined]
+        self.assertEqual(source._build_helper_argv()[-1], "3")  # type: ignore[attr-defined]
+        self.assertEqual(state.sampled_frames, 3)
 
 
 if __name__ == "__main__":

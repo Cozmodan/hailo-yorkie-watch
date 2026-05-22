@@ -250,7 +250,7 @@ def run_watch_stream(*, max_frames: int | None = None, keep_debug_frame: bool = 
     try:
         state = run_stream_watch_loop(
             config=stream_config,
-            source_factory=lambda: create_stream_source(stream_config),
+            source_factory=lambda: create_stream_source(stream_config, frame_limit=max_frames or 0),
             scan_frame=scan_frame,
             notify_alert=notify_alert,
             max_frames=max_frames or 0,
