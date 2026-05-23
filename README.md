@@ -8,10 +8,11 @@ This first milestone implements plumbing plus an optional dog-detection stage:
 - Save local test snapshots under `data/snapshots/`.
 - Optionally sample frames from a configured live camera stream.
 - Optionally run a Hailo Apps object detector against the saved snapshot.
+- Optionally ask a local Ollama-compatible VLM for a short explanation of alert evidence.
 - Send a WhatsApp notification through OpenClaw only when the configured detection condition matches.
 - Provide a small command-line entry point.
 
-VLM support and Yorkie breed recognition are intentionally not implemented yet. For now, a matching `dog` object is treated as the alert condition.
+Yorkie breed recognition is intentionally not implemented yet. For now, a matching `dog` object is treated as the alert condition, and optional VLM text is only a secondary explanation.
 
 ## Repository safety
 
@@ -82,6 +83,13 @@ YORKIE_TARGET_CLASSES=dog,person
 YORKIE_DETECTOR_TIMEOUT=60
 YORKIE_HAILO_DETECT_COMMAND=
 
+YORKIE_VLM_ENABLED=0
+YORKIE_VLM_BASE_URL=http://127.0.0.1:8000
+YORKIE_VLM_MODEL=<vlm-model-name>
+YORKIE_VLM_TIMEOUT_SECONDS=60
+YORKIE_VLM_MAX_IMAGE_WIDTH=1280
+YORKIE_VLM_PROMPT="Look at this image. Is there a dog or Yorkie? Briefly describe what you see and mention uncertainty."
+
 YORKIE_NIGHT_MODE=auto
 YORKIE_SCAN_TILES=2x2
 YORKIE_ENABLE_CROP_SCAN=1
@@ -148,6 +156,47 @@ Dog alerts use a stricter policy layer after scanner output:
 When an alert is sent, Yorkie Watch draws a dog bounding box, confidence label, timestamp, and scanner region onto an evidence image and sends that annotated image to OpenClaw instead of the raw frame.
 
 If false alerts continue, raise `DOG_MIN_CONFIDENCE` to `0.50` or `0.55`. If alerts are still too frequent, increase `DOG_ALERT_COOLDOWN_SECONDS` to `300`. If real dogs are missed, reduce `DOG_MIN_CONFIDENCE` slightly or reduce `DOG_CONFIRMATION_FRAMES`.
+
+## Local VLM reasoning
+
+VLM reasoning is optional and disabled by default. It is intended for a local Hailo VLM, Hailo-Ollama style bridge, or Ollama-compatible service that accepts image prompts. Keep the real service URL and model name in local `.env` only.
+
+Starting placeholder settings:
+
+```dotenv
+YORKIE_VLM_ENABLED=0
+YORKIE_VLM_BASE_URL=http://127.0.0.1:8000
+YORKIE_VLM_MODEL=<vlm-model-name>
+YORKIE_VLM_TIMEOUT_SECONDS=60
+YORKIE_VLM_MAX_IMAGE_WIDTH=1280
+YORKIE_VLM_PROMPT="Look at this image. Is there a dog or Yorkie? Briefly describe what you see and mention uncertainty."
+```
+
+When `YORKIE_VLM_ENABLED=1`, Yorkie Watch sends the annotated alert evidence image to the local VLM after the dog detector confirms an alert. The VLM summary is appended to the WhatsApp message:
+
+```text
+Dog detected by Hailo Yorkie Watch: lower_half
+Detector: dog confidence 0.52 >= 0.45
+VLM: A small dog-like animal appears near the doorway. Confidence moderate.
+```
+
+The original evidence image is not overwritten. A resized temporary image copy is created under `data/vlm_tmp/`, sent to the VLM, and removed after the request. If the VLM is unavailable or times out, the normal detector alert still sends without VLM text.
+
+Yorkie Watch stores non-secret metadata for the latest alert in `data/latest_event.json`, including the annotated evidence image path, detector class, confidence, region, and VLM summary if one was available. Runtime state files and temporary VLM images are ignored by Git.
+
+Ask a local VLM question about the latest alert image:
+
+```powershell
+python -m yorkie_watch.main --chat "Was that actually my dog or just a shadow?"
+```
+
+By default, chat mode prints the answer only. To send the generated answer through OpenClaw, explicitly opt in:
+
+```powershell
+python -m yorkie_watch.main --chat "Was that actually my dog or just a shadow?" --send-chat-reply
+```
+
+This is a safe CLI bridge for testing. It does not add OpenClaw inbound webhook handling yet.
 
 `YORKIE_HAILO_APPS_ROOT` should point to the installed `hailo-apps` checkout on the Pi. `YORKIE_HAILO_PYTHON` defaults to `python3` so the detector subprocess can use system Hailo packages outside this project virtual environment. `YORKIE_HAILO_DETECT_COMMAND` is optional; leave it empty to use the repo wrapper, or set it to a JSON-emitting command template with `{image}`, `{hef}`, `{hailo_apps_root}`, `{threshold}`, and `{classes}` placeholders after verifying a custom Hailo command.
 
@@ -292,6 +341,18 @@ python -m yorkie_watch.main --what-see
 
 When SSH media is configured, `--what-see` sends the saved snapshot as an attachment plus a detection summary. If media is not configured yet, it sends the text summary and logs that the snapshot attachment was skipped.
 
+Ask the local VLM about the latest alert image:
+
+```powershell
+python -m yorkie_watch.main --chat "What does the latest alert image show?"
+```
+
+Send that VLM answer through OpenClaw only when explicitly requested:
+
+```powershell
+python -m yorkie_watch.main --chat "What does the latest alert image show?" --send-chat-reply
+```
+
 Run continuously until Ctrl+C or a service manager stops the process:
 
 ```powershell
@@ -366,6 +427,6 @@ Keep the local `.env` file in the working directory so Python loads runtime cred
 - Home Assistant Pi receives the external security camera feed.
 - Raspberry Pi 5 with AI HAT+ 2 pulls snapshots/frames from Home Assistant.
 - Hailo object detection is wired as an optional subprocess stage.
-- VLM detection will be added later.
-- Jetson Nano running OpenClaw will later send WhatsApp alerts.
+- Optional local VLM reasoning can explain annotated alert evidence and answer latest-alert chat questions.
+- Jetson Nano running OpenClaw sends WhatsApp alerts.
 - GitHub remains the source of truth for non-secret project code.

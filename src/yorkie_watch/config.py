@@ -118,6 +118,18 @@ class DogAlertConfig:
     max_evidence_images: int
 
 
+@dataclass(frozen=True)
+class VLMConfig:
+    """Runtime settings for optional local vision-language model reasoning."""
+
+    enabled: bool
+    base_url: str
+    model: str
+    timeout_seconds: float
+    max_image_width: int
+    prompt: str
+
+
 def load_environment(env_path: str | Path | None = None) -> None:
     """Load environment variables from `.env` without overriding existing values."""
     loaded = load_dotenv(dotenv_path=env_path, override=False)
@@ -336,4 +348,33 @@ def load_dog_alert_config() -> DogAlertConfig:
         evidence_dir=get_env("DOG_EVIDENCE_DIR", "data/evidence") or "data/evidence",
         image_retention_seconds=max(0.0, get_float_env("IMAGE_RETENTION_SECONDS", 3600.0)),
         max_evidence_images=max(0, get_int_env("MAX_EVIDENCE_IMAGES", 100)),
+    )
+
+
+def load_vlm_config() -> VLMConfig:
+    """Load optional local VLM settings from `.env` / process environment."""
+    load_environment()
+    enabled = get_bool_env("YORKIE_VLM_ENABLED", False)
+    timeout_seconds = get_float_env("YORKIE_VLM_TIMEOUT_SECONDS", 60.0)
+    max_image_width = get_int_env("YORKIE_VLM_MAX_IMAGE_WIDTH", 1280)
+    if timeout_seconds <= 0:
+        message = "YORKIE_VLM_TIMEOUT_SECONDS must be greater than zero."
+        LOGGER.error(message)
+        raise ConfigError(message)
+    if max_image_width <= 0:
+        message = "YORKIE_VLM_MAX_IMAGE_WIDTH must be greater than zero."
+        LOGGER.error(message)
+        raise ConfigError(message)
+
+    return VLMConfig(
+        enabled=enabled,
+        base_url=get_env("YORKIE_VLM_BASE_URL", "http://127.0.0.1:8000") or "http://127.0.0.1:8000",
+        model=get_env("YORKIE_VLM_MODEL", required=enabled),
+        timeout_seconds=timeout_seconds,
+        max_image_width=max_image_width,
+        prompt=get_env(
+            "YORKIE_VLM_PROMPT",
+            "Look at this image. Is there a dog or Yorkie? Briefly describe what you see and mention uncertainty.",
+        )
+        or "Look at this image. Is there a dog or Yorkie? Briefly describe what you see and mention uncertainty.",
     )

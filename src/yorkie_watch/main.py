@@ -12,24 +12,36 @@ from .config import (
     ConfigError,
     DogAlertConfig,
     StreamConfig,
+    VLMConfig,
     WatchConfig,
     load_detector_config,
     load_dog_alert_config,
     load_scan_config,
     load_stream_config,
+    load_vlm_config,
     load_watch_config,
 )
 from .alerting import (
+    DogAlertCandidate,
     annotate_dog_alert_image,
     evaluate_dog_alert,
     format_dog_alert_message,
 )
 from .cleanup import cleanup_evidence_artifacts, cleanup_stream_artifacts, delete_image_file
 from .detector import COCO_DOG_CLASS_ID, DetectionResult, DetectorError, create_detector, print_result
+from .event_state import LATEST_EVENT_PATH, latest_event_image_path, load_latest_event, write_latest_event
 from .ha_client import HomeAssistantClient, HomeAssistantError
 from .openclaw_client import OpenClawClient
 from .scanner import best_crop_path, best_dog_confidence, scan_confirmed_snapshots, scan_image, scanner_summary
 from .stream_source import StreamFrameSource, StreamSourceError, create_stream_source
+from .vlm_client import (
+    VLMClient,
+    VLMResult,
+    cleanup_vlm_image_copy,
+    create_vlm_image_copy,
+    redact_vlm_text,
+    shorten_vlm_text,
+)
 
 LOGGER = logging.getLogger(__name__)
 SNAPSHOT_DIR = Path("data") / "snapshots"
@@ -64,6 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--watch-stream", action="store_true", help="Continuously scan sampled live stream frames for alerts.")
     mode.add_argument("--test-openclaw", action="store_true", help="Send one test event to OpenClaw.")
     mode.add_argument("--test-detect", metavar="IMAGE", help="Run detector once against an existing image.")
+    mode.add_argument("--chat", metavar="MESSAGE", help="Ask the VLM about the latest Yorkie Watch alert image.")
     mode.add_argument(
         "--what-see",
         action="store_true",
@@ -85,6 +98,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--stream-save-debug-frame",
         action="store_true",
         help="Keep sampled live stream frames for this run.",
+    )
+    parser.add_argument(
+        "--send-chat-reply",
+        action="store_true",
+        help="Send --chat output through OpenClaw instead of only printing it.",
     )
     return parser
 
@@ -479,6 +497,55 @@ def run_what_see() -> int:
     return 1
 
 
+def run_chat(
+    question: str,
+    *,
+    send_reply: bool = False,
+    vlm_config: VLMConfig | None = None,
+    vlm_client: VLMClient | None = None,
+    notifier: OpenClawClient | None = None,
+    latest_event_path: str | Path = LATEST_EVENT_PATH,
+) -> int:
+    """Answer a user question about the latest alert image using the optional VLM."""
+    event = load_latest_event(latest_event_path)
+    if event is None:
+        print("No latest Yorkie Watch event is available yet.")
+        return 1
+
+    image_path = latest_event_image_path(event)
+    if image_path is None or not image_path.exists():
+        print("Latest Yorkie Watch event image is unavailable; cannot ask the VLM.")
+        return 1
+
+    vlm_config = vlm_config or load_vlm_config()
+    if not vlm_config.enabled:
+        print("VLM is disabled. Set YORKIE_VLM_ENABLED=1 to use chat mode.")
+        return 1
+
+    prompt = _build_latest_event_chat_prompt(question, event)
+    result = _run_vlm_for_image(
+        image_path,
+        prompt,
+        vlm_config=vlm_config,
+        vlm_client=vlm_client,
+    )
+    if not result.ok:
+        LOGGER.warning("VLM chat request failed: %s", result.error)
+        print(f"VLM chat failed: {result.error}")
+        return 1
+
+    answer = result.text
+    print(answer)
+    if send_reply:
+        notifier = notifier or OpenClawClient.from_env()
+        if notifier.send_message(answer, event_type="chat_reply"):
+            LOGGER.info("OpenClaw chat reply sent.")
+            return 0
+        print("Chat answer generated, but OpenClaw reply failed.")
+        return 1
+    return 0
+
+
 def run_detection_and_maybe_notify(
     image_path: Path,
     *,
@@ -511,6 +578,9 @@ def _notify_detection_result(
     notifier: OpenClawClient | None = None,
     dog_alert_config: DogAlertConfig | None = None,
     confirmed_frames: int = 1,
+    vlm_config: VLMConfig | None = None,
+    vlm_client: VLMClient | None = None,
+    latest_event_path: str | Path = LATEST_EVENT_PATH,
 ) -> bool:
     """Send the dog alert for an already computed scanner result."""
     print_result(result)
@@ -546,7 +616,18 @@ def _notify_detection_result(
         print("Alert condition matched, but annotated evidence image could not be created.")
         return False
 
-    message = format_dog_alert_message(candidate)
+    vlm_summary = _maybe_get_vlm_alert_summary(
+        evidence_path,
+        vlm_config=vlm_config,
+        vlm_client=vlm_client,
+    )
+    message = format_dog_alert_message(candidate, vlm_summary=vlm_summary)
+    _write_latest_event_safe(
+        image_path=evidence_path,
+        candidate=candidate,
+        vlm_summary=vlm_summary,
+        latest_event_path=latest_event_path,
+    )
     if notifier.send_message(
         message,
         event_type="dog_detected",
@@ -559,6 +640,92 @@ def _notify_detection_result(
 
     print("Alert condition matched, but OpenClaw notification failed.")
     return False
+
+
+def _maybe_get_vlm_alert_summary(
+    evidence_path: Path,
+    *,
+    vlm_config: VLMConfig | None = None,
+    vlm_client: VLMClient | None = None,
+) -> str:
+    try:
+        config = vlm_config or load_vlm_config()
+    except ConfigError as exc:
+        LOGGER.warning("VLM configuration is invalid; sending detector alert without VLM text: %s", exc)
+        return ""
+    if not config.enabled:
+        return ""
+    result = _run_vlm_for_image(
+        evidence_path,
+        config.prompt,
+        vlm_config=config,
+        vlm_client=vlm_client,
+    )
+    if result.ok:
+        return result.text
+    LOGGER.warning("VLM alert summary failed; sending detector alert without VLM text: %s", result.error)
+    return ""
+
+
+def _run_vlm_for_image(
+    image_path: Path,
+    prompt: str,
+    *,
+    vlm_config: VLMConfig,
+    vlm_client: VLMClient | None = None,
+) -> VLMResult:
+    temp_path: Path | None = None
+    try:
+        temp_path = create_vlm_image_copy(image_path, max_width=vlm_config.max_image_width)
+        client = vlm_client or VLMClient.from_config(vlm_config)
+        return client.describe_image(temp_path, prompt)
+    except Exception as exc:
+        error = redact_vlm_text(str(exc), vlm_config.base_url)
+        LOGGER.warning("VLM request failed before completion: %s", error)
+        return VLMResult(False, "", error, vlm_config.model)
+    finally:
+        if temp_path is not None:
+            cleanup_vlm_image_copy(temp_path)
+
+
+def _write_latest_event_safe(
+    *,
+    image_path: Path,
+    candidate: DogAlertCandidate,
+    vlm_summary: str,
+    latest_event_path: str | Path,
+) -> None:
+    try:
+        detection = candidate.detection
+        write_latest_event(
+            image_path=image_path,
+            detector_class=detection.class_name or "dog",
+            confidence=float(candidate.confidence),
+            region=str(candidate.region),
+            vlm_summary=vlm_summary,
+            state_path=latest_event_path,
+        )
+    except OSError as exc:
+        LOGGER.warning("Could not write latest event state: %s", exc)
+
+
+def _build_latest_event_chat_prompt(question: str, event: dict[str, object]) -> str:
+    event_summary = [
+        "The user is asking about the most recent Yorkie Watch alert.",
+        "Answer from the image and event metadata. Be brief, mention uncertainty, and do not claim identity.",
+        "",
+        f"User question: {question}",
+        "",
+        "Latest event metadata:",
+        f"- timestamp: {event.get('timestamp', '')}",
+        f"- detector_class: {event.get('detector_class', '')}",
+        f"- confidence: {event.get('confidence', '')}",
+        f"- region: {event.get('region', '')}",
+    ]
+    vlm_summary = str(event.get("vlm_summary") or "").strip()
+    if vlm_summary:
+        event_summary.append(f"- previous_vlm_summary: {shorten_vlm_text(vlm_summary)}")
+    return "\n".join(event_summary)
 
 
 def _matched_confidence(result: DetectionResult) -> float:
@@ -718,6 +885,8 @@ def main() -> int:
             return run_test_detect(args.test_detect)
         if args.what_see:
             return run_what_see()
+        if args.chat:
+            return run_chat(args.chat, send_reply=args.send_chat_reply)
     except (ConfigError, DetectorError, HomeAssistantError, StreamSourceError, ValueError) as exc:
         LOGGER.error("%s", exc)
         return 1

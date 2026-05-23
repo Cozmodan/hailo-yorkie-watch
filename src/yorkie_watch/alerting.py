@@ -117,14 +117,15 @@ def evaluate_dog_alert(
     )
 
 
-def format_dog_alert_message(candidate: DogAlertCandidate) -> str:
+def format_dog_alert_message(candidate: DogAlertCandidate, *, vlm_summary: str = "") -> str:
     """Build the WhatsApp alert text for one confirmed dog candidate."""
-    return "\n".join(
-        [
-            f"Dog detected by Hailo Yorkie Watch: {candidate.region}",
-            candidate.reason,
-        ]
-    )
+    lines = [
+        f"Dog detected by Hailo Yorkie Watch: {candidate.region}",
+        f"Detector: {candidate.reason}",
+    ]
+    if vlm_summary:
+        lines.append(f"VLM: {vlm_summary}")
+    return "\n".join(lines)
 
 
 def annotate_dog_alert_image(
