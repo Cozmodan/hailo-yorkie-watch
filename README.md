@@ -84,11 +84,18 @@ YORKIE_DETECTOR_TIMEOUT=60
 YORKIE_HAILO_DETECT_COMMAND=
 
 YORKIE_VLM_ENABLED=0
-YORKIE_VLM_BASE_URL=http://127.0.0.1:8000
+YORKIE_VLM_BASE_URL=http://127.0.0.1:8010
 YORKIE_VLM_MODEL=<vlm-model-name>
 YORKIE_VLM_TIMEOUT_SECONDS=60
 YORKIE_VLM_MAX_IMAGE_WIDTH=1280
 YORKIE_VLM_PROMPT="Look at this image. Is there a dog or Yorkie? Briefly describe what you see and mention uncertainty."
+
+HAILO_VLM_HEF=/usr/local/hailo/resources/models/hailo10h/Qwen2-VL-2B-Instruct.hef
+HAILO_VLM_HOST=127.0.0.1
+HAILO_VLM_PORT=8010
+HAILO_VLM_MAX_TOKENS=80
+HAILO_VLM_OPTIMIZE_MEMORY=1
+HAILO_VLM_CLEAR_CONTEXT=1
 
 YORKIE_NIGHT_MODE=auto
 YORKIE_SCAN_TILES=2x2
@@ -165,11 +172,48 @@ Starting placeholder settings:
 
 ```dotenv
 YORKIE_VLM_ENABLED=0
-YORKIE_VLM_BASE_URL=http://127.0.0.1:8000
+YORKIE_VLM_BASE_URL=http://127.0.0.1:8010
 YORKIE_VLM_MODEL=<vlm-model-name>
 YORKIE_VLM_TIMEOUT_SECONDS=60
 YORKIE_VLM_MAX_IMAGE_WIDTH=1280
 YORKIE_VLM_PROMPT="Look at this image. Is there a dog or Yorkie? Briefly describe what you see and mention uncertainty."
+```
+
+The repo includes a local Hailo VLM wrapper that exposes the Ollama-style endpoints Yorkie Watch already calls. It must run with system Python because `hailo_platform`, `cv2`, and `numpy` are installed outside the project virtual environment:
+
+```bash
+/usr/bin/python3 scripts/hailo_vlm_server.py
+```
+
+Wrapper settings:
+
+```dotenv
+HAILO_VLM_HEF=/usr/local/hailo/resources/models/hailo10h/Qwen2-VL-2B-Instruct.hef
+HAILO_VLM_HOST=127.0.0.1
+HAILO_VLM_PORT=8010
+HAILO_VLM_MAX_TOKENS=80
+HAILO_VLM_OPTIMIZE_MEMORY=1
+HAILO_VLM_CLEAR_CONTEXT=1
+```
+
+The wrapper serves:
+
+- `GET /health`
+- `POST /api/chat`
+- `POST /api/generate`
+
+It accepts Ollama-style base64 image requests, decodes JPEG/PNG images with OpenCV, converts BGR to RGB, resizes to the Hailo VLM input frame shape `336x336x3`, and serializes generation with a process-local lock. By default it clears VLM context before each request.
+
+If a separate `hailo-ollama.service` or other process owns the Hailo device, stop it before starting this wrapper:
+
+```bash
+sudo systemctl stop hailo-ollama.service
+```
+
+Check the wrapper locally:
+
+```bash
+curl http://127.0.0.1:8010/health
 ```
 
 When `YORKIE_VLM_ENABLED=1`, Yorkie Watch sends the annotated alert evidence image to the local VLM after the dog detector confirms an alert. The VLM summary is appended to the WhatsApp message:

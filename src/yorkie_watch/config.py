@@ -368,7 +368,7 @@ def load_vlm_config() -> VLMConfig:
 
     return VLMConfig(
         enabled=enabled,
-        base_url=get_env("YORKIE_VLM_BASE_URL", "http://127.0.0.1:8000") or "http://127.0.0.1:8000",
+        base_url=get_env("YORKIE_VLM_BASE_URL", "http://127.0.0.1:8010") or "http://127.0.0.1:8010",
         model=get_env("YORKIE_VLM_MODEL", required=enabled),
         timeout_seconds=timeout_seconds,
         max_image_width=max_image_width,
