@@ -62,6 +62,11 @@ OPENCLAW_WHATSAPP_ACCOUNT=business
 OPENCLAW_SSH_MEDIA_REMOTE_DIR=/tmp/yorkie-watch
 OPENCLAW_SSH_MEDIA_COMMAND_TEMPLATE=
 
+OPENCLAW_INBOUND_HOST=127.0.0.1
+OPENCLAW_INBOUND_PORT=8020
+OPENCLAW_INBOUND_SHARED_SECRET=
+OPENCLAW_ALLOWED_SENDERS=
+
 YORKIE_DETECTOR_ENABLED=0
 YORKIE_DETECTOR_BACKEND=hailo_apps
 YORKIE_HAILO_HEF=/usr/share/hailo-models/yolov8m_h10.hef
@@ -149,6 +154,28 @@ Do not put real values in committed files. Keep real URLs, hostnames, tokens, ca
 `OPENCLAW_NOTIFY_MODE` defaults to `http` if unset. `OPENCLAW_EVENT_ENDPOINT` is optional and defaults to `/api/events/yorkie-watch`. `OPENCLAW_SSH_PORT`, `OPENCLAW_BINARY`, and `OPENCLAW_WHATSAPP_ACCOUNT` default to `22`, `openclaw`, and `business`.
 
 Snapshot attachments over SSH are opt-in because OpenClaw media CLI syntax must be verified on the Nano first. When `OPENCLAW_SSH_MEDIA_COMMAND_TEMPLATE` is set, the Pi copies the snapshot to `OPENCLAW_SSH_MEDIA_REMOTE_DIR` with `scp`, then runs the configured OpenClaw media command on the Nano. Available template placeholders are `{binary}`, `{channel}`, `{account}`, `{target}`, `{message}`, and `{media_path}`. Leave the template empty until the media command syntax is confirmed.
+
+OpenClaw inbound WhatsApp replies can be bridged back into Yorkie Watch with a small local HTTP server:
+
+```powershell
+python scripts/openclaw_inbound_bridge.py
+```
+
+The bridge listens on `OPENCLAW_INBOUND_HOST:OPENCLAW_INBOUND_PORT`, defaulting to `127.0.0.1:8020`, and exposes:
+
+- `GET /health`: returns a JSON health response.
+- `POST /openclaw/inbound`: accepts OpenClaw reply JSON using flexible sender and message fields such as `sender`, `from`, `phone`, `message`, `text`, `body`, and `timestamp`.
+
+Set `OPENCLAW_INBOUND_SHARED_SECRET` locally if OpenClaw should include an `X-OpenClaw-Secret` header. Set `OPENCLAW_ALLOWED_SENDERS` to a comma-separated placeholder list such as `<whatsapp-sender-placeholder>` values when only selected senders should be accepted. Leave both empty for local-only testing.
+
+Supported WhatsApp commands are:
+
+- `status`: returns a Yorkie Watch status summary and latest alert metadata when available.
+- `check last alert`, `last alert`, `is that a dog`, or `false trigger`: reuses the existing chat flow against `data/latest_event.json` and sends the VLM answer back through OpenClaw.
+- `pause alerts`: writes a local pause flag under `data/runtime/`.
+- `resume alerts`: removes the local pause flag.
+
+Unknown commands receive a short help response with the supported command list. The bridge does not require or store real phone numbers, hostnames, tokens, camera names, OpenClaw URLs, WhatsApp targets, or security details in committed files.
 
 `YORKIE_DETECTOR_ENABLED` defaults to `0`, so `--once` still only saves a Home Assistant snapshot unless you opt in to detection. The default detector backend is `hailo_apps`, using `/usr/share/hailo-models/yolov8m_h10.hef`, `dog,person` as requested detector classes, and `0.45` as the starting dog confidence threshold.
 
