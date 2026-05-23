@@ -96,6 +96,7 @@ HAILO_VLM_PORT=8010
 HAILO_VLM_MAX_TOKENS=80
 HAILO_VLM_OPTIMIZE_MEMORY=1
 HAILO_VLM_CLEAR_CONTEXT=1
+HAILO_VLM_UNLOAD_AFTER_REQUEST=1
 
 YORKIE_NIGHT_MODE=auto
 YORKIE_SCAN_TILES=2x2
@@ -194,6 +195,7 @@ HAILO_VLM_PORT=8010
 HAILO_VLM_MAX_TOKENS=80
 HAILO_VLM_OPTIMIZE_MEMORY=1
 HAILO_VLM_CLEAR_CONTEXT=1
+HAILO_VLM_UNLOAD_AFTER_REQUEST=1
 ```
 
 The wrapper serves:
@@ -203,6 +205,10 @@ The wrapper serves:
 - `POST /api/generate`
 
 It accepts Ollama-style base64 image requests, decodes JPEG/PNG images with OpenCV, converts BGR to RGB, resizes to the Hailo VLM input frame shape `336x336x3`, and serializes generation with a process-local lock. By default it clears VLM context before each request.
+
+`HAILO_VLM_UNLOAD_AFTER_REQUEST=1` is the safe default for a single Hailo HAT+ 2. The wrapper loads the Hailo `VDevice` and VLM only while answering `/api/chat` or `/api/generate`, then releases them immediately so the live YOLO detector can use the same physical device afterward. This is slower per VLM question, but lets detector and VLM work sequentially without `HAILO_OUT_OF_PHYSICAL_DEVICES`.
+
+Set `HAILO_VLM_UNLOAD_AFTER_REQUEST=0` only when you want permanent loaded mode. Permanent mode is faster for repeated VLM requests, but it holds the Hailo `VDevice` and blocks the live detector on a one-device Pi until the wrapper exits.
 
 If a separate `hailo-ollama.service` or other process owns the Hailo device, stop it before starting this wrapper:
 

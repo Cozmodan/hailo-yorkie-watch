@@ -514,7 +514,11 @@ def run_chat(
 
     image_path = latest_event_image_path(event)
     if image_path is None or not image_path.exists():
-        print("Latest Yorkie Watch event image is unavailable; cannot ask the VLM.")
+        missing_path = image_path if image_path is not None else event.get("image_path", "")
+        print(
+            "Latest Yorkie Watch event image is unavailable; cannot ask the VLM. "
+            f"Missing image path: {missing_path}. Wait for the next real alert, then try again."
+        )
         return 1
 
     vlm_config = vlm_config or load_vlm_config()

@@ -245,6 +245,8 @@ class VLMIntegrationTests(unittest.TestCase):
 
         self.assertEqual(returncode, 1)
         self.assertIn("image is unavailable", output.getvalue())
+        self.assertIn("missing.jpg", output.getvalue())
+        self.assertIn("Wait for the next real alert", output.getvalue())
 
     def test_vlm_image_resize_helper_does_not_overwrite_original(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -60,6 +60,7 @@ class FakeVLM:
         self.response = response
         self.clear_context_calls = 0
         self.generate_calls: list[tuple[object, object, int]] = []
+        self.closed = False
 
     def clear_context(self) -> None:
         self.clear_context_calls += 1
@@ -68,9 +69,33 @@ class FakeVLM:
         self.generate_calls.append((prompt, frames, max_tokens))
         return self.response
 
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeVDevice:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
 
 def encoded_image() -> str:
     return base64.b64encode(b"fake-jpeg").decode("ascii")
+
+
+def server_config(*, unload_after_request: bool = True) -> server.ServerConfig:
+    return server.ServerConfig(
+        hef_path=server.DEFAULT_HEF,
+        host="127.0.0.1",
+        port=8010,
+        max_tokens=12,
+        optimize_memory=True,
+        clear_context=True,
+        unload_after_request=unload_after_request,
+        model="Qwen2-VL-2B-Instruct",
+    )
 
 
 class HailoVLMServerTests(unittest.TestCase):
@@ -155,16 +180,8 @@ class HailoVLMServerTests(unittest.TestCase):
     def test_runtime_clears_context_and_generates_once(self) -> None:
         vlm = FakeVLM()
         runtime = server.HailoVLMRuntime(
-            config=server.ServerConfig(
-                hef_path=server.DEFAULT_HEF,
-                host="127.0.0.1",
-                port=8010,
-                max_tokens=12,
-                optimize_memory=True,
-                clear_context=True,
-                model="Qwen2-VL-2B-Instruct",
-            ),
-            vdevice=object(),
+            config=server_config(),
+            vdevice=FakeVDevice(),
             vlm=vlm,
             cv2_module=FakeCV2(),
             numpy_module=FakeNumpy(),
@@ -182,6 +199,62 @@ class HailoVLMServerTests(unittest.TestCase):
         self.assertEqual(vlm.clear_context_calls, 1)
         self.assertEqual(len(vlm.generate_calls), 1)
         self.assertEqual(vlm.generate_calls[0][2], 12)
+
+    def test_unload_after_request_loads_and_closes_runtime_per_request(self) -> None:
+        loaded_vlms: list[FakeVLM] = []
+        loaded_vdevices: list[FakeVDevice] = []
+
+        def load_runtime(config: server.ServerConfig) -> server.HailoVLMRuntime:
+            vlm = FakeVLM("Temporary answer")
+            vdevice = FakeVDevice()
+            loaded_vlms.append(vlm)
+            loaded_vdevices.append(vdevice)
+            return server.HailoVLMRuntime(
+                config=config,
+                vdevice=vdevice,
+                vlm=vlm,
+                cv2_module=FakeCV2(),
+                numpy_module=FakeNumpy(),
+            )
+
+        manager = server.HailoVLMRuntimeManager(
+            config=server_config(unload_after_request=True),
+            runtime_loader=load_runtime,
+        )
+        request = server.parse_generate_payload({"prompt": "Describe.", "images": [encoded_image()]})
+
+        text = manager.generate(request)
+
+        self.assertEqual(text, "Temporary answer")
+        self.assertFalse(manager.loaded)
+        self.assertEqual(len(loaded_vlms), 1)
+        self.assertTrue(loaded_vlms[0].closed)
+        self.assertTrue(loaded_vdevices[0].closed)
+
+    def test_permanent_mode_reuses_loaded_runtime_until_closed(self) -> None:
+        vlm = FakeVLM("Permanent answer")
+        vdevice = FakeVDevice()
+        runtime = server.HailoVLMRuntime(
+            config=server_config(unload_after_request=False),
+            vdevice=vdevice,
+            vlm=vlm,
+            cv2_module=FakeCV2(),
+            numpy_module=FakeNumpy(),
+        )
+        manager = server.HailoVLMRuntimeManager(
+            config=server_config(unload_after_request=False),
+            runtime=runtime,
+        )
+        request = server.parse_generate_payload({"prompt": "Describe.", "images": [encoded_image()]})
+
+        self.assertTrue(manager.loaded)
+        self.assertEqual(manager.generate(request), "Permanent answer")
+        self.assertTrue(manager.loaded)
+        manager.close()
+
+        self.assertFalse(manager.loaded)
+        self.assertTrue(vlm.closed)
+        self.assertTrue(vdevice.closed)
 
     def test_ollama_response_shape(self) -> None:
         response = server.ollama_response(model="Qwen2-VL-2B-Instruct", content="A dog is visible.")

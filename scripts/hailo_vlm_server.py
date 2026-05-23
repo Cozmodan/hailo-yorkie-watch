@@ -11,7 +11,7 @@ import threading
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 LOGGER = logging.getLogger("hailo_vlm_server")
 DEFAULT_HEF = "/usr/local/hailo/resources/models/hailo10h/Qwen2-VL-2B-Instruct.hef"
@@ -37,6 +37,7 @@ class ServerConfig:
     max_tokens: int
     optimize_memory: bool
     clear_context: bool
+    unload_after_request: bool
     model: str
 
 
@@ -91,6 +92,61 @@ class HailoVLMRuntime:
             )
         return clean_response_text(output)
 
+    def close(self) -> None:
+        """Release Hailo runtime resources when supported by the loaded objects."""
+        close_resource(self.vlm)
+        close_resource(self.vdevice)
+
+
+class HailoVLMRuntimeManager:
+    """Loads the Hailo VLM permanently or per request based on configuration."""
+
+    def __init__(
+        self,
+        *,
+        config: ServerConfig,
+        runtime_loader: Callable[[ServerConfig], HailoVLMRuntime] | None = None,
+        runtime: HailoVLMRuntime | None = None,
+    ) -> None:
+        self.config = config
+        self._runtime_loader = runtime_loader or load_hailo_runtime
+        self._runtime = runtime
+        self._lock = threading.Lock()
+
+    @property
+    def loaded(self) -> bool:
+        return self._runtime is not None
+
+    def generate(self, request: VLMRequest) -> str:
+        if self.config.unload_after_request:
+            return self._generate_with_temporary_runtime(request)
+        runtime = self._runtime
+        if runtime is None:
+            with self._lock:
+                if self._runtime is None:
+                    self._runtime = self._load_runtime()
+                runtime = self._runtime
+        return runtime.generate(request)
+
+    def close(self) -> None:
+        runtime = self._runtime
+        self._runtime = None
+        if runtime is not None:
+            runtime.close()
+
+    def _generate_with_temporary_runtime(self, request: VLMRequest) -> str:
+        with self._lock:
+            runtime = self._load_runtime()
+            self._runtime = runtime
+            try:
+                return runtime.generate(request)
+            finally:
+                self._runtime = None
+                runtime.close()
+
+    def _load_runtime(self) -> HailoVLMRuntime:
+        return self._runtime_loader(self.config)
+
 
 def load_config() -> ServerConfig:
     """Load Hailo VLM wrapper settings from environment variables."""
@@ -102,6 +158,7 @@ def load_config() -> ServerConfig:
         max_tokens=max(1, get_int_env("HAILO_VLM_MAX_TOKENS", DEFAULT_MAX_TOKENS)),
         optimize_memory=get_bool_env("HAILO_VLM_OPTIMIZE_MEMORY", True),
         clear_context=get_bool_env("HAILO_VLM_CLEAR_CONTEXT", True),
+        unload_after_request=get_bool_env("HAILO_VLM_UNLOAD_AFTER_REQUEST", True),
         model=Path(hef_path).stem or DEFAULT_MODEL,
     )
 
@@ -153,6 +210,29 @@ def load_hailo_runtime(config: ServerConfig) -> HailoVLMRuntime:
         cv2_module=cv2,
         numpy_module=np,
     )
+
+
+def build_runtime_manager(config: ServerConfig) -> HailoVLMRuntimeManager:
+    """Build the runtime manager without monopolizing Hailo when unloading is enabled."""
+    if config.unload_after_request:
+        LOGGER.info(
+            "Hailo VLM unload-after-request mode enabled; the model will load only during requests."
+        )
+        return HailoVLMRuntimeManager(config=config)
+    return HailoVLMRuntimeManager(config=config, runtime=load_hailo_runtime(config))
+
+
+def close_resource(resource: object) -> None:
+    """Call the first supported close-style method on a runtime resource."""
+    for method_name in ("close", "release", "shutdown"):
+        method = getattr(resource, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            method()
+        except Exception as exc:
+            LOGGER.warning("Could not release Hailo VLM resource via %s(): %s", method_name, exc)
+        return
 
 
 def instantiate_vlm(*, vlm_class: object, vdevice: object, hef_path: str, optimize_memory: bool) -> object:
@@ -378,7 +458,8 @@ class HailoVLMHandler(BaseHTTPRequestHandler):
             {
                 "ok": True,
                 "model": self.runtime.config.model,
-                "loaded": True,
+                "loaded": self.runtime.loaded,
+                "unload_after_request": self.runtime.config.unload_after_request,
             }
         )
 
@@ -431,7 +512,7 @@ class HailoVLMHandler(BaseHTTPRequestHandler):
 class HailoVLMHTTPServer(ThreadingHTTPServer):
     """Threading HTTP server with an attached Hailo runtime."""
 
-    def __init__(self, server_address: tuple[str, int], handler_class: type[BaseHTTPRequestHandler], runtime: HailoVLMRuntime) -> None:
+    def __init__(self, server_address: tuple[str, int], handler_class: type[BaseHTTPRequestHandler], runtime: HailoVLMRuntimeManager) -> None:
         super().__init__(server_address, handler_class)
         self.runtime = runtime
 
@@ -439,7 +520,7 @@ class HailoVLMHTTPServer(ThreadingHTTPServer):
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     config = load_config()
-    runtime = load_hailo_runtime(config)
+    runtime = build_runtime_manager(config)
     server = HailoVLMHTTPServer((config.host, config.port), HailoVLMHandler, runtime)
     LOGGER.info(
         "Serving Hailo VLM wrapper on http://%s:%d using model %s.",
@@ -452,6 +533,7 @@ def main() -> int:
     except KeyboardInterrupt:
         LOGGER.info("Hailo VLM wrapper stopped.")
     finally:
+        runtime.close()
         server.server_close()
     return 0
 
