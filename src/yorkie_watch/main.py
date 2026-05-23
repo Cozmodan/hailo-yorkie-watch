@@ -10,14 +10,21 @@ from pathlib import Path
 
 from .config import (
     ConfigError,
+    DogAlertConfig,
     StreamConfig,
     WatchConfig,
     load_detector_config,
+    load_dog_alert_config,
     load_scan_config,
     load_stream_config,
     load_watch_config,
 )
-from .cleanup import cleanup_stream_artifacts
+from .alerting import (
+    annotate_dog_alert_image,
+    evaluate_dog_alert,
+    format_dog_alert_message,
+)
+from .cleanup import cleanup_evidence_artifacts, cleanup_stream_artifacts, delete_image_file
 from .detector import COCO_DOG_CLASS_ID, DetectionResult, DetectorError, create_detector, print_result
 from .ha_client import HomeAssistantClient, HomeAssistantError
 from .openclaw_client import OpenClawClient
@@ -36,6 +43,7 @@ class WatchState:
     iterations: int = 0
     last_alert_at: float | None = None
     last_snapshot_path: Path | None = None
+    dog_confirmation_count: int = 0
 
 
 @dataclass
@@ -45,6 +53,7 @@ class StreamWatchState:
     sampled_frames: int = 0
     failures: int = 0
     last_alert_at: float | None = None
+    dog_confirmation_count: int = 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -89,22 +98,38 @@ def run_once() -> int:
     detector_config = load_detector_config()
     if detector_config.enabled:
         scan_config = load_scan_config()
+        dog_alert_config = load_dog_alert_config()
         detector = create_detector(detector_config)
         if scan_config.confirm_frames > 1:
-            result = scan_confirmed_snapshots(
-                capture_snapshot=lambda frame_index: saved_path
-                if frame_index == 0
-                else client.save_snapshot(
+            extra_snapshot_paths: list[Path] = []
+
+            def capture_confirmation_snapshot(frame_index: int) -> Path:
+                if frame_index == 0:
+                    return saved_path
+                extra_path = client.save_snapshot(
                     SNAPSHOT_DIR / f"snapshot_{timestamp}_frame{frame_index + 1}.jpg",
                     attempts=3,
                     delay_seconds=2.0,
-                ),
+                )
+                extra_snapshot_paths.append(extra_path)
+                return extra_path
+
+            result = scan_confirmed_snapshots(
+                capture_snapshot=capture_confirmation_snapshot,
                 detector=detector,
                 config=scan_config,
             )
-            _notify_detection_result(saved_path, result)
+            if not dog_alert_config.save_debug_frames:
+                for extra_snapshot_path in extra_snapshot_paths:
+                    delete_image_file(extra_snapshot_path, label="confirmation snapshot")
+            _notify_detection_result(
+                saved_path,
+                result,
+                dog_alert_config=dog_alert_config,
+                confirmed_frames=scan_config.confirm_frames,
+            )
         else:
-            run_detection_and_maybe_notify(saved_path, detector=detector)
+            run_detection_and_maybe_notify(saved_path, detector=detector, dog_alert_config=dog_alert_config)
     return 0
 
 
@@ -119,6 +144,7 @@ def run_watch(*, max_iterations: int | None = None) -> int:
     client = HomeAssistantClient.from_env()
     detector = create_detector(load_detector_config())
     scan_config = load_scan_config()
+    dog_alert_config = load_dog_alert_config()
     notifier: OpenClawClient | None = None
 
     def capture_snapshot(iteration: int) -> Path:
@@ -126,23 +152,41 @@ def run_watch(*, max_iterations: int | None = None) -> int:
 
     def scan_snapshot(snapshot_path: Path, iteration: int) -> DetectionResult:
         if scan_config.confirm_frames > 1:
-            return scan_confirmed_snapshots(
-                capture_snapshot=lambda frame_index: snapshot_path
-                if frame_index == 0
-                else client.save_snapshot(
+            extra_snapshot_paths: list[Path] = []
+
+            def capture_confirmation_snapshot(frame_index: int) -> Path:
+                if frame_index == 0:
+                    return snapshot_path
+                extra_path = client.save_snapshot(
                     _watch_snapshot_path(iteration, frame_index=frame_index),
                     attempts=3,
                     delay_seconds=2.0,
-                ),
-                detector=detector,
-                config=scan_config,
-            )
+                )
+                extra_snapshot_paths.append(extra_path)
+                return extra_path
+
+            try:
+                return scan_confirmed_snapshots(
+                    capture_snapshot=capture_confirmation_snapshot,
+                    detector=detector,
+                    config=scan_config,
+                )
+            finally:
+                if not dog_alert_config.save_debug_frames:
+                    for extra_snapshot_path in extra_snapshot_paths:
+                        delete_image_file(extra_snapshot_path, label="confirmation snapshot")
         return scan_image(snapshot_path, detector=detector, config=scan_config).result
 
     def notify_alert(snapshot_path: Path, result: DetectionResult) -> bool:
         nonlocal notifier
         notifier = notifier or OpenClawClient.from_env()
-        return _notify_detection_result(snapshot_path, result, notifier=notifier)
+        return _notify_detection_result(
+            snapshot_path,
+            result,
+            notifier=notifier,
+            dog_alert_config=dog_alert_config,
+            confirmed_frames=dog_alert_config.confirmation_frames,
+        )
 
     def send_heartbeat(iteration: int) -> bool:
         nonlocal notifier
@@ -160,8 +204,11 @@ def run_watch(*, max_iterations: int | None = None) -> int:
             scan_snapshot=scan_snapshot,
             notify_alert=notify_alert,
             send_heartbeat=send_heartbeat,
+            dog_alert_config=dog_alert_config,
+            cleanup_artifacts=lambda: cleanup_evidence_artifacts(dog_alert_config),
         )
     except KeyboardInterrupt:
+        cleanup_evidence_artifacts(dog_alert_config)
         LOGGER.info("Watch mode stopped.")
         print("Watch mode stopped.")
         return 0
@@ -179,16 +226,23 @@ def run_watch_loop(
     send_heartbeat: Callable[[int], bool] | None = None,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
+    dog_alert_config: DogAlertConfig | None = None,
+    cleanup_artifacts: Callable[[], object] | None = None,
 ) -> WatchState:
     """Run the watch loop with injectable IO boundaries for tests."""
+    dog_alert_config = dog_alert_config or load_dog_alert_config()
     state = WatchState()
+    if cleanup_artifacts is not None:
+        cleanup_artifacts()
     while config.max_iterations == 0 or state.iterations < config.max_iterations:
         state.iterations += 1
         iteration = state.iterations
+        snapshot_path: Path | None = None
         try:
             snapshot_path = capture_snapshot(iteration)
         except HomeAssistantError as exc:
             LOGGER.warning("Watch snapshot fetch failed: %s", exc)
+            state.dog_confirmation_count = 0
             if config.stop_on_error:
                 raise
             if config.reuse_last_snapshot_on_ha_fail and state.last_snapshot_path is not None:
@@ -204,25 +258,36 @@ def run_watch_loop(
             result = scan_snapshot(snapshot_path, iteration)
         except HomeAssistantError as exc:
             LOGGER.warning("Watch snapshot fetch failed during scan confirmation: %s", exc)
+            state.dog_confirmation_count = 0
             if config.stop_on_error:
                 raise
         except DetectorError as exc:
             LOGGER.warning("Watch detector failed: %s", exc)
+            state.dog_confirmation_count = 0
             if config.stop_on_error:
                 raise
         else:
-            if result.matched:
-                alert_time = clock()
-                if _watch_cooldown_active(state, config, alert_time):
-                    LOGGER.info("alert matched but cooldown active; no message sent")
-                elif notify_alert(snapshot_path, result):
-                    state.last_alert_at = alert_time
-                else:
-                    LOGGER.warning("Alert condition matched, but notification was not sent.")
-            elif config.send_no_match_log:
+            alert_sent = _handle_watch_scan_result(
+                image_path=snapshot_path,
+                result=result,
+                state=state,
+                dog_alert_config=dog_alert_config,
+                notify_alert=notify_alert,
+                alert_time=clock(),
+            )
+            if not alert_sent and config.send_no_match_log and not result.matched:
                 LOGGER.info("watch no alert: %s", result.matched_reason)
 
+        if (
+            snapshot_path is not None
+            and not dog_alert_config.save_debug_frames
+            and not (config.reuse_last_snapshot_on_ha_fail and state.last_snapshot_path == snapshot_path)
+        ):
+            delete_image_file(snapshot_path, label="processed snapshot")
+
         _watch_iteration_finished(config, iteration, send_heartbeat, sleep)
+        if cleanup_artifacts is not None:
+            cleanup_artifacts()
 
     return state
 
@@ -238,6 +303,7 @@ def run_watch_stream(*, max_frames: int | None = None, keep_debug_frame: bool = 
 
     detector = create_detector(load_detector_config())
     scan_config = load_scan_config()
+    dog_alert_config = load_dog_alert_config()
     notifier: OpenClawClient | None = None
 
     def scan_frame(frame_path: Path) -> DetectionResult:
@@ -246,7 +312,13 @@ def run_watch_stream(*, max_frames: int | None = None, keep_debug_frame: bool = 
     def notify_alert(frame_path: Path, result: DetectionResult) -> bool:
         nonlocal notifier
         notifier = notifier or OpenClawClient.from_env()
-        return _notify_detection_result(frame_path, result, notifier=notifier)
+        return _notify_detection_result(
+            frame_path,
+            result,
+            notifier=notifier,
+            dog_alert_config=dog_alert_config,
+            confirmed_frames=dog_alert_config.confirmation_frames,
+        )
 
     LOGGER.info("Starting live stream watch mode.")
     try:
@@ -256,10 +328,15 @@ def run_watch_stream(*, max_frames: int | None = None, keep_debug_frame: bool = 
             scan_frame=scan_frame,
             notify_alert=notify_alert,
             max_frames=max_frames or 0,
-            cleanup_artifacts=lambda: cleanup_stream_artifacts(stream_config),
+            dog_alert_config=dog_alert_config,
+            cleanup_artifacts=lambda: (
+                cleanup_stream_artifacts(stream_config),
+                cleanup_evidence_artifacts(dog_alert_config),
+            ),
         )
     except KeyboardInterrupt:
         cleanup_stream_artifacts(stream_config)
+        cleanup_evidence_artifacts(dog_alert_config)
         LOGGER.info("Live stream watch mode stopped.")
         print("Live stream watch mode stopped.")
         return 0
@@ -283,8 +360,10 @@ def run_stream_watch_loop(
     sleep: Callable[[float], None] = time.sleep,
     cleanup_artifacts: Callable[[], object] | None = None,
     cleanup_every_frames: int = STREAM_CLEANUP_EVERY_FRAMES,
+    dog_alert_config: DogAlertConfig | None = None,
 ) -> StreamWatchState:
     """Run stream reconnect, scan, notification, and cooldown behavior."""
+    dog_alert_config = dog_alert_config or load_dog_alert_config()
     state = StreamWatchState()
     if cleanup_artifacts is not None:
         cleanup_artifacts()
@@ -299,19 +378,21 @@ def run_stream_watch_loop(
                         result = scan_frame(frame_path)
                     except DetectorError as exc:
                         LOGGER.warning("Stream detector failed: %s", exc)
+                        state.dog_confirmation_count = 0
                     else:
                         alert_sent = _handle_stream_scan_result(
                             frame_path=frame_path,
                             result=result,
                             state=state,
                             config=config,
+                            dog_alert_config=dog_alert_config,
                             notify_alert=notify_alert,
                             alert_time=clock(),
                         )
                     finally:
                         if _delete_processed_stream_frame(config=config, alert_sent=alert_sent):
-                            frame_path.unlink(missing_ok=True)
-                            LOGGER.debug("Deleted processed stream frame: %s", frame_path)
+                            if delete_image_file(frame_path, label="processed stream frame"):
+                                LOGGER.debug("Deleted processed stream frame: %s", frame_path)
                         if (
                             cleanup_artifacts is not None
                             and cleanup_every_frames > 0
@@ -325,6 +406,7 @@ def run_stream_watch_loop(
                         return state
         except StreamSourceError as exc:
             state.failures += 1
+            state.dog_confirmation_count = 0
             LOGGER.warning("Stream failure: %s", exc)
             if config.max_failures and state.failures >= config.max_failures:
                 LOGGER.error("Stream failure limit reached after %d failure(s).", state.failures)
@@ -402,6 +484,7 @@ def run_detection_and_maybe_notify(
     *,
     detector: object,
     notifier: OpenClawClient | None = None,
+    dog_alert_config: DogAlertConfig | None = None,
 ) -> bool:
     """Run detection and send a notification only when the alert condition matches."""
     try:
@@ -412,11 +495,13 @@ def run_detection_and_maybe_notify(
         return False
 
     print_result(result)
-    if not result.matched:
-        print(f"No alert sent: {result.matched_reason}.")
-        return False
-
-    return _notify_detection_result(image_path, result, notifier=notifier)
+    return _notify_detection_result(
+        image_path,
+        result,
+        notifier=notifier,
+        dog_alert_config=dog_alert_config,
+        confirmed_frames=1,
+    )
 
 
 def _notify_detection_result(
@@ -424,17 +509,51 @@ def _notify_detection_result(
     result: DetectionResult,
     *,
     notifier: OpenClawClient | None = None,
+    dog_alert_config: DogAlertConfig | None = None,
+    confirmed_frames: int = 1,
 ) -> bool:
     """Send the dog alert for an already computed scanner result."""
     print_result(result)
-    if not result.matched:
-        print(f"No alert sent: {result.matched_reason}.")
+    dog_alert_config = dog_alert_config or load_dog_alert_config()
+    evaluation = evaluate_dog_alert(image_path, result, dog_alert_config)
+    if not evaluation.matched or evaluation.candidate is None:
+        print(f"No alert sent: {evaluation.reason}.")
+        return False
+    if confirmed_frames < dog_alert_config.confirmation_frames:
+        LOGGER.info(
+            "dog alert confirmation %d/%d: %s",
+            confirmed_frames,
+            dog_alert_config.confirmation_frames,
+            evaluation.reason,
+        )
+        print(
+            "No alert sent: "
+            f"dog confirmation {confirmed_frames}/{dog_alert_config.confirmation_frames}."
+        )
         return False
 
     notifier = notifier or OpenClawClient.from_env()
-    confidence = _matched_confidence(result)
-    message = f"Dog detected by Hailo Yorkie Watch: {result.matched_reason}"
-    if notifier.send_message(message, event_type="dog_detected", confidence=confidence, attachment_path=image_path):
+    candidate = evaluation.candidate
+    cleanup_evidence_artifacts(dog_alert_config)
+    try:
+        evidence_path = annotate_dog_alert_image(
+            image_path,
+            candidate,
+            output_dir=dog_alert_config.evidence_dir,
+        )
+    except OSError as exc:
+        LOGGER.error("Could not create annotated dog alert image: %s", exc)
+        print("Alert condition matched, but annotated evidence image could not be created.")
+        return False
+
+    message = format_dog_alert_message(candidate)
+    if notifier.send_message(
+        message,
+        event_type="dog_detected",
+        confidence=candidate.confidence,
+        attachment_path=evidence_path,
+    ):
+        cleanup_evidence_artifacts(dog_alert_config)
         print("Alert sent: dog detected.")
         return True
 
@@ -459,10 +578,47 @@ def _watch_snapshot_path(iteration: int, *, frame_index: int = 0) -> Path:
     return SNAPSHOT_DIR / f"watch_{timestamp}_iter{iteration}{frame_suffix}.jpg"
 
 
-def _watch_cooldown_active(state: WatchState, config: WatchConfig, alert_time: float) -> bool:
+def _watch_cooldown_active(state: WatchState, config: DogAlertConfig, alert_time: float) -> bool:
     if state.last_alert_at is None:
         return False
     return alert_time - state.last_alert_at < config.cooldown_seconds
+
+
+def _handle_watch_scan_result(
+    *,
+    image_path: Path,
+    result: DetectionResult,
+    state: WatchState,
+    dog_alert_config: DogAlertConfig,
+    notify_alert: Callable[[Path, DetectionResult], bool],
+    alert_time: float,
+) -> bool:
+    evaluation = evaluate_dog_alert(image_path, result, dog_alert_config)
+    if not evaluation.matched:
+        state.dog_confirmation_count = 0
+        LOGGER.info("watch no dog alert: %s", evaluation.reason)
+        return False
+
+    state.dog_confirmation_count = min(
+        state.dog_confirmation_count + 1,
+        dog_alert_config.confirmation_frames,
+    )
+    LOGGER.info(
+        "dog alert confirmation %d/%d: %s",
+        state.dog_confirmation_count,
+        dog_alert_config.confirmation_frames,
+        evaluation.reason,
+    )
+    if state.dog_confirmation_count < dog_alert_config.confirmation_frames:
+        return False
+    if _watch_cooldown_active(state, dog_alert_config, alert_time):
+        LOGGER.info("alert matched but cooldown active; no message sent")
+        return False
+    if notify_alert(image_path, result):
+        state.last_alert_at = alert_time
+        return True
+    LOGGER.warning("Alert condition matched, but notification was not sent.")
+    return False
 
 
 def _watch_iteration_finished(
@@ -489,15 +645,31 @@ def _handle_stream_scan_result(
     result: DetectionResult,
     state: StreamWatchState,
     config: StreamConfig,
+    dog_alert_config: DogAlertConfig,
     notify_alert: Callable[[Path, DetectionResult], bool],
     alert_time: float,
 ) -> bool:
-    if not result.matched:
-        LOGGER.info("stream no alert: %s", result.matched_reason)
+    del config
+    evaluation = evaluate_dog_alert(frame_path, result, dog_alert_config)
+    if not evaluation.matched:
+        state.dog_confirmation_count = 0
+        LOGGER.info("stream no dog alert: %s", evaluation.reason)
         return False
 
-    LOGGER.info("Stream detector matched: %s", result.matched_reason)
-    if state.last_alert_at is not None and alert_time - state.last_alert_at < config.alert_cooldown_seconds:
+    state.dog_confirmation_count = min(
+        state.dog_confirmation_count + 1,
+        dog_alert_config.confirmation_frames,
+    )
+    LOGGER.info(
+        "dog alert confirmation %d/%d: %s",
+        state.dog_confirmation_count,
+        dog_alert_config.confirmation_frames,
+        evaluation.reason,
+    )
+    if state.dog_confirmation_count < dog_alert_config.confirmation_frames:
+        return False
+
+    if state.last_alert_at is not None and alert_time - state.last_alert_at < dog_alert_config.cooldown_seconds:
         LOGGER.info("stream alert matched but cooldown active; no message sent")
         return False
 
@@ -509,7 +681,8 @@ def _handle_stream_scan_result(
 
 
 def _delete_processed_stream_frame(*, config: StreamConfig, alert_sent: bool) -> bool:
-    return not (config.keep_frames or config.save_debug_frames or alert_sent)
+    del alert_sent
+    return not (config.keep_frames or config.save_debug_frames)
 
 
 def _detection_summary(result: DetectionResult) -> str:

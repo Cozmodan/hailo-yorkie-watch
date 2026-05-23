@@ -7,8 +7,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from yorkie_watch.config import WatchConfig  # noqa: E402
-from yorkie_watch.detector import DetectionResult, DetectorError  # noqa: E402
+from yorkie_watch.config import DogAlertConfig, WatchConfig  # noqa: E402
+from yorkie_watch.detector import Detection, DetectionResult, DetectorError  # noqa: E402
 from yorkie_watch.ha_client import HomeAssistantError  # noqa: E402
 from yorkie_watch.main import build_parser, run_watch_loop  # noqa: E402
 
@@ -32,10 +32,29 @@ def scan_result(image_path: Path, *, matched: bool) -> DetectionResult:
         ok=True,
         backend="fake",
         image=str(image_path),
-        detections=(),
+        detections=(
+            Detection(class_name="dog", class_id=16, confidence=0.72, bbox=(0.1, 0.1, 0.5, 0.6)),
+        )
+        if matched
+        else (),
         matched=matched,
         matched_reason="dog matched" if matched else "no match",
     )
+
+
+def dog_alert_config(**overrides: object) -> DogAlertConfig:
+    values = {
+        "min_confidence": 0.45,
+        "cooldown_seconds": 300.0,
+        "confirmation_frames": 1,
+        "min_box_area_ratio": 0.01,
+        "save_debug_frames": True,
+        "evidence_dir": "data/evidence",
+        "image_retention_seconds": 3600.0,
+        "max_evidence_images": 100,
+    }
+    values.update(overrides)
+    return DogAlertConfig(**values)  # type: ignore[arg-type]
 
 
 class WatchModeTests(unittest.TestCase):
@@ -48,6 +67,7 @@ class WatchModeTests(unittest.TestCase):
             scan_snapshot=lambda image_path, _iteration: scan_result(image_path, matched=True),
             notify_alert=lambda image_path, _result: sent.append(image_path) is None,
             clock=lambda: 10.0,
+            dog_alert_config=dog_alert_config(),
         )
 
         self.assertEqual(state.iterations, 1)
@@ -65,6 +85,7 @@ class WatchModeTests(unittest.TestCase):
                 scan_snapshot=lambda image_path, _iteration: scan_result(image_path, matched=True),
                 notify_alert=lambda image_path, _result: sent.append(image_path) is None,
                 clock=lambda: next(alert_times),
+                dog_alert_config=dog_alert_config(),
             )
 
         self.assertEqual(sent, [Path("snapshot-1.jpg")])
@@ -87,6 +108,7 @@ class WatchModeTests(unittest.TestCase):
                 scan_snapshot=lambda image_path, _iteration: scans.append(image_path)
                 or scan_result(image_path, matched=False),
                 notify_alert=lambda _image_path, _result: True,
+                dog_alert_config=dog_alert_config(),
             )
 
         self.assertEqual(state.iterations, 2)
@@ -108,6 +130,7 @@ class WatchModeTests(unittest.TestCase):
                 capture_snapshot=lambda iteration: Path(f"snapshot-{iteration}.jpg"),
                 scan_snapshot=scan_snapshot,
                 notify_alert=lambda _image_path, _result: True,
+                dog_alert_config=dog_alert_config(),
             )
 
         self.assertEqual(state.iterations, 2)
@@ -121,6 +144,7 @@ class WatchModeTests(unittest.TestCase):
             capture_snapshot=lambda iteration: captures.append(iteration) or Path(f"snapshot-{iteration}.jpg"),
             scan_snapshot=lambda image_path, _iteration: scan_result(image_path, matched=False),
             notify_alert=lambda _image_path, _result: True,
+            dog_alert_config=dog_alert_config(),
         )
 
         self.assertEqual(state.iterations, 2)

@@ -13,9 +13,9 @@ from unittest.mock import Mock, patch
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from yorkie_watch.config import StreamConfig  # noqa: E402
+from yorkie_watch.config import DogAlertConfig, StreamConfig  # noqa: E402
 from yorkie_watch.cleanup import cleanup_image_directory  # noqa: E402
-from yorkie_watch.detector import DetectionResult  # noqa: E402
+from yorkie_watch.detector import Detection, DetectionResult  # noqa: E402
 from yorkie_watch.main import build_parser, run_stream_watch_loop  # noqa: E402
 from yorkie_watch.stream_source import (  # noqa: E402
     FFmpegSubprocessFrameSource,
@@ -61,10 +61,35 @@ def scan_result(frame_path: Path, *, matched: bool) -> DetectionResult:
         ok=True,
         backend="fake",
         image=str(frame_path),
-        detections=(),
+        detections=(
+            Detection(class_name="dog", class_id=16, confidence=0.72, bbox=(0.1, 0.1, 0.5, 0.6)),
+        )
+        if matched
+        else (),
         matched=matched,
         matched_reason="dog matched" if matched else "no dog matched",
     )
+
+
+def dog_alert_config(**overrides: object) -> DogAlertConfig:
+    values = {
+        "min_confidence": 0.45,
+        "cooldown_seconds": 300.0,
+        "confirmation_frames": 1,
+        "min_box_area_ratio": 0.01,
+        "save_debug_frames": True,
+        "evidence_dir": "data/evidence",
+        "image_retention_seconds": 3600.0,
+        "max_evidence_images": 100,
+    }
+    values.update(overrides)
+    return DogAlertConfig(**values)  # type: ignore[arg-type]
+
+
+def project_data_temp_dir() -> tempfile.TemporaryDirectory[str]:
+    data_dir = PROJECT_ROOT / "data"
+    data_dir.mkdir(exist_ok=True)
+    return tempfile.TemporaryDirectory(dir=data_dir)
 
 
 class FakeFrameSource:
@@ -109,6 +134,7 @@ class StreamWatchTests(unittest.TestCase):
             notify_alert=lambda frame_path, _result: sent.append(frame_path) is None,
             max_frames=1,
             clock=lambda: 10.0,
+            dog_alert_config=dog_alert_config(),
         )
 
         self.assertEqual(sent, [Path("frame-1.jpg")])
@@ -126,6 +152,7 @@ class StreamWatchTests(unittest.TestCase):
                 notify_alert=lambda frame_path, _result: sent.append(frame_path) is None,
                 max_frames=2,
                 clock=lambda: next(times),
+                dog_alert_config=dog_alert_config(),
             )
 
         self.assertEqual(sent, [Path("frame-1.jpg")])
@@ -156,7 +183,7 @@ class StreamWatchTests(unittest.TestCase):
         self.assertIn("Reconnecting stream", "\n".join(logs.output))
 
     def test_processed_stream_frame_is_deleted_when_keep_and_debug_are_false(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with project_data_temp_dir() as tmp_dir:
             frame_path = Path(tmp_dir) / "data" / "stream_frames" / "frame.jpg"
             frame_path.parent.mkdir(parents=True)
             frame_path.write_bytes(b"frame")
@@ -167,13 +194,15 @@ class StreamWatchTests(unittest.TestCase):
                 scan_frame=lambda frame: scan_result(frame, matched=False),
                 notify_alert=lambda _frame_path, _result: True,
                 max_frames=1,
+                dog_alert_config=dog_alert_config(),
+                cleanup_artifacts=None,
             )
 
             self.assertFalse(frame_path.exists())
 
     def test_processed_stream_frame_is_kept_when_keep_or_debug_is_true(self) -> None:
         for overrides in ({"keep_frames": True, "save_debug_frames": False}, {"keep_frames": False, "save_debug_frames": True}):
-            with self.subTest(overrides=overrides), tempfile.TemporaryDirectory() as tmp_dir:
+            with self.subTest(overrides=overrides), project_data_temp_dir() as tmp_dir:
                 frame_path = Path(tmp_dir) / "data" / "stream_frames" / "frame.jpg"
                 frame_path.parent.mkdir(parents=True)
                 frame_path.write_bytes(b"frame")
@@ -184,12 +213,13 @@ class StreamWatchTests(unittest.TestCase):
                     scan_frame=lambda frame: scan_result(frame, matched=False),
                     notify_alert=lambda _frame_path, _result: True,
                     max_frames=1,
+                    dog_alert_config=dog_alert_config(),
                 )
 
                 self.assertTrue(frame_path.exists())
 
-    def test_alert_stream_frame_is_available_for_notification_and_kept(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
+    def test_alert_stream_frame_is_available_for_notification_then_deleted_when_debug_off(self) -> None:
+        with project_data_temp_dir() as tmp_dir:
             frame_path = Path(tmp_dir) / "data" / "stream_frames" / "alert.jpg"
             frame_path.parent.mkdir(parents=True)
             frame_path.write_bytes(b"frame")
@@ -207,10 +237,11 @@ class StreamWatchTests(unittest.TestCase):
                 notify_alert=notify_alert,
                 max_frames=1,
                 clock=lambda: 10.0,
+                dog_alert_config=dog_alert_config(),
             )
 
             self.assertEqual(notified, [frame_path])
-            self.assertTrue(frame_path.exists())
+            self.assertFalse(frame_path.exists())
 
     def test_cleanup_deletes_old_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

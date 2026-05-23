@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import StreamConfig
+from .config import DogAlertConfig, StreamConfig
 
 LOGGER = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -53,6 +53,44 @@ def cleanup_stream_artifacts(
         label="debug crops",
     )
     return stream_stats, crop_stats
+
+
+def cleanup_evidence_artifacts(
+    config: DogAlertConfig,
+    *,
+    allowed_data_dir: str | Path = PROJECT_DATA_DIR,
+    now: float | None = None,
+) -> CleanupStats:
+    """Clean annotated alert evidence images within project data."""
+    return cleanup_image_directory(
+        config.evidence_dir,
+        retention_minutes=config.image_retention_seconds / 60.0,
+        max_files=config.max_evidence_images,
+        allowed_data_dir=allowed_data_dir,
+        now=now,
+        label="alert evidence",
+    )
+
+
+def delete_image_file(
+    path: str | Path,
+    *,
+    allowed_data_dir: str | Path = PROJECT_DATA_DIR,
+    label: str = "image",
+) -> bool:
+    """Delete one generated image only when it lives inside the configured data directory."""
+    image_path = _resolve_project_path(path)
+    if not image_path.exists():
+        return False
+    allowed_path = _resolve_project_path(allowed_data_dir)
+    if not _is_within(image_path, allowed_path):
+        LOGGER.warning("Skipping %s delete outside project data directory: %s", label, image_path)
+        return False
+    if image_path.suffix.lower() not in IMAGE_SUFFIXES:
+        LOGGER.warning("Skipping %s delete for non-image file: %s", label, image_path)
+        return False
+    image_path.unlink(missing_ok=True)
+    return True
 
 
 def cleanup_image_directory(

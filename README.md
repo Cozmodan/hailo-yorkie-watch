@@ -66,9 +66,17 @@ YORKIE_DETECTOR_BACKEND=hailo_apps
 YORKIE_HAILO_HEF=/usr/share/hailo-models/yolov8m_h10.hef
 YORKIE_HAILO_APPS_ROOT=<hailo-apps-root>
 YORKIE_HAILO_PYTHON=python3
-YORKIE_DOG_CONFIDENCE=0.35
-YORKIE_FULL_FRAME_DOG_CONFIDENCE=0.35
-YORKIE_CROP_DOG_CONFIDENCE=0.20
+DOG_MIN_CONFIDENCE=0.45
+DOG_ALERT_COOLDOWN_SECONDS=180
+DOG_CONFIRMATION_FRAMES=2
+DOG_MIN_BOX_AREA_RATIO=0.01
+SAVE_DEBUG_FRAMES=false
+IMAGE_RETENTION_SECONDS=3600
+MAX_EVIDENCE_IMAGES=100
+DOG_EVIDENCE_DIR=data/evidence
+YORKIE_DOG_CONFIDENCE=0.45
+YORKIE_FULL_FRAME_DOG_CONFIDENCE=0.45
+YORKIE_CROP_DOG_CONFIDENCE=0.45
 YORKIE_PERSON_CONFIDENCE=0.35
 YORKIE_TARGET_CLASSES=dog,person
 YORKIE_DETECTOR_TIMEOUT=60
@@ -81,10 +89,10 @@ YORKIE_ENABLE_PERSON_ROI_SCAN=1
 YORKIE_CONFIRM_FRAMES=2
 YORKIE_CONFIRM_INTERVAL_SECONDS=1.0
 YORKIE_MAX_CROPS_PER_IMAGE=8
-YORKIE_SAVE_DEBUG_CROPS=1
+YORKIE_SAVE_DEBUG_CROPS=0
 
 YORKIE_WATCH_INTERVAL_SECONDS=5
-YORKIE_WATCH_COOLDOWN_SECONDS=300
+YORKIE_WATCH_COOLDOWN_SECONDS=180
 YORKIE_WATCH_MAX_ITERATIONS=
 YORKIE_WATCH_SEND_NO_MATCH_LOG=1
 YORKIE_WATCH_HEARTBEAT_EVERY=0
@@ -110,7 +118,7 @@ YORKIE_STREAM_RETENTION_MINUTES=60
 YORKIE_STREAM_MAX_FRAME_FILES=500
 YORKIE_DEBUG_CROP_RETENTION_MINUTES=60
 YORKIE_DEBUG_CROP_MAX_FILES=500
-YORKIE_STREAM_ALERT_COOLDOWN_SECONDS=300
+YORKIE_STREAM_ALERT_COOLDOWN_SECONDS=180
 YORKIE_STREAM_PYTHON=python3
 ```
 
@@ -126,7 +134,20 @@ Do not put real values in committed files. Keep real URLs, hostnames, tokens, ca
 
 Snapshot attachments over SSH are opt-in because OpenClaw media CLI syntax must be verified on the Nano first. When `OPENCLAW_SSH_MEDIA_COMMAND_TEMPLATE` is set, the Pi copies the snapshot to `OPENCLAW_SSH_MEDIA_REMOTE_DIR` with `scp`, then runs the configured OpenClaw media command on the Nano. Available template placeholders are `{binary}`, `{channel}`, `{account}`, `{target}`, `{message}`, and `{media_path}`. Leave the template empty until the media command syntax is confirmed.
 
-`YORKIE_DETECTOR_ENABLED` defaults to `0`, so `--once` still only saves a Home Assistant snapshot unless you opt in to detection. The default detector backend is `hailo_apps`, using `/usr/share/hailo-models/yolov8m_h10.hef`, `dog,person` as requested detector classes, `0.35` as the full-frame dog confidence, and `0.20` as the crop/zoom dog confidence.
+`YORKIE_DETECTOR_ENABLED` defaults to `0`, so `--once` still only saves a Home Assistant snapshot unless you opt in to detection. The default detector backend is `hailo_apps`, using `/usr/share/hailo-models/yolov8m_h10.hef`, `dog,person` as requested detector classes, and `0.45` as the starting dog confidence threshold.
+
+Dog alerts use a stricter policy layer after scanner output:
+
+- `DOG_MIN_CONFIDENCE=0.45` is the minimum dog confidence that can send an alert.
+- `DOG_ALERT_COOLDOWN_SECONDS=180` suppresses repeated dog alerts after one sends.
+- `DOG_CONFIRMATION_FRAMES=2` requires two consecutive valid dog detections before alerting.
+- `DOG_MIN_BOX_AREA_RATIO=0.01` ignores tiny dog boxes smaller than 1% of the full image.
+- `SAVE_DEBUG_FRAMES=false` keeps non-alert frames and debug crops from building up by default.
+- `IMAGE_RETENTION_SECONDS=3600` and `MAX_EVIDENCE_IMAGES=100` limit annotated alert evidence images under `DOG_EVIDENCE_DIR`.
+
+When an alert is sent, Yorkie Watch draws a dog bounding box, confidence label, timestamp, and scanner region onto an evidence image and sends that annotated image to OpenClaw instead of the raw frame.
+
+If false alerts continue, raise `DOG_MIN_CONFIDENCE` to `0.50` or `0.55`. If alerts are still too frequent, increase `DOG_ALERT_COOLDOWN_SECONDS` to `300`. If real dogs are missed, reduce `DOG_MIN_CONFIDENCE` slightly or reduce `DOG_CONFIRMATION_FRAMES`.
 
 `YORKIE_HAILO_APPS_ROOT` should point to the installed `hailo-apps` checkout on the Pi. `YORKIE_HAILO_PYTHON` defaults to `python3` so the detector subprocess can use system Hailo packages outside this project virtual environment. `YORKIE_HAILO_DETECT_COMMAND` is optional; leave it empty to use the repo wrapper, or set it to a JSON-emitting command template with `{image}`, `{hef}`, `{hailo_apps_root}`, `{threshold}`, and `{classes}` placeholders after verifying a custom Hailo command.
 
@@ -169,9 +190,9 @@ Current scanner passes are:
 
 Person detections are only used as region-of-interest cues. The project does not do face recognition or identify people.
 
-Crop detections are mapped back to original snapshot coordinates and include a `source` value in JSON such as `full_frame`, `tile`, `lower_half`, `person_roi`, or `center_zoom`. When `YORKIE_SAVE_DEBUG_CROPS=1`, crop images are saved under `data/debug_crops/`; repository image ignore rules keep these real camera crops out of Git.
+Crop detections are mapped back to original snapshot coordinates and include a `source` value in JSON such as `full_frame`, `tile`, `lower_half`, `person_roi`, or `center_zoom`. The alert policy requires the dog bounding-box centre to remain inside the active scanner region for simple regions such as `lower_half`, `center_zoom`, and tiles. When `YORKIE_SAVE_DEBUG_CROPS=1` or `SAVE_DEBUG_FRAMES=true`, crop images are saved under `data/debug_crops/`; repository image ignore rules keep these real camera crops out of Git.
 
-`YORKIE_CONFIRM_FRAMES` controls optional multi-frame confirmation for `--once` and `--watch` alerts. The default `2` means the app can take two snapshots separated by `YORKIE_CONFIRM_INTERVAL_SECONDS` and alert only when dog detection appears in both frames. Set `YORKIE_CONFIRM_FRAMES=1` for faster manual single-frame testing.
+`DOG_CONFIRMATION_FRAMES` controls alert confirmation. The default `2` means watch modes require two consecutive valid dog detections before sending. `YORKIE_CONFIRM_FRAMES` remains available for snapshot confirmation captures in `--once` and `--watch`; keep it aligned with `DOG_CONFIRMATION_FRAMES` unless you are deliberately testing.
 
 ## Home Assistant snapshot test
 
@@ -277,7 +298,7 @@ Run continuously until Ctrl+C or a service manager stops the process:
 python -m yorkie_watch.main --watch
 ```
 
-Watch mode fetches a fresh Home Assistant snapshot every `YORKIE_WATCH_INTERVAL_SECONDS`, runs the same multi-stage scanner used by alert scans, and only sends WhatsApp when the alert condition matches. It keeps scanning during `YORKIE_WATCH_COOLDOWN_SECONDS`; matched alerts inside the cooldown are logged without sending a repeated message. Home Assistant and detector failures are logged and retried on the next watch iteration unless `YORKIE_WATCH_STOP_ON_ERROR=1`.
+Watch mode fetches a fresh Home Assistant snapshot every `YORKIE_WATCH_INTERVAL_SECONDS`, runs the same multi-stage scanner used by alert scans, and only sends WhatsApp when the dog alert policy matches. It keeps scanning during `DOG_ALERT_COOLDOWN_SECONDS`; matched alerts inside the cooldown are logged without sending a repeated message. Home Assistant and detector failures are logged and retried on the next watch iteration unless `YORKIE_WATCH_STOP_ON_ERROR=1`.
 
 Use `YORKIE_WATCH_MAX_ITERATIONS` or a CLI override for bounded checks:
 
@@ -301,7 +322,7 @@ Run a bounded stream test and keep its sampled frames:
 python -m yorkie_watch.main --watch-stream --stream-frames 3 --stream-save-debug-frame
 ```
 
-`YORKIE_STREAM_ALERT_COOLDOWN_SECONDS` applies the live-stream alert cooldown. By default, `YORKIE_STREAM_KEEP_FRAMES=0` and `YORKIE_STREAM_SAVE_DEBUG_FRAMES=0` delete each sampled stream JPG after it has been scanned, unless it was sent as the alert attachment. Set either value to `1` only for local debugging. Startup, periodic stream-loop, and bounded-test cleanup remove old `data/stream_frames/` and `data/debug_crops/` images by `YORKIE_STREAM_RETENTION_MINUTES`, `YORKIE_STREAM_MAX_FRAME_FILES`, `YORKIE_DEBUG_CROP_RETENTION_MINUTES`, and `YORKIE_DEBUG_CROP_MAX_FILES`. Cleanup is limited to project `data/` image directories, and generated camera frames/crops must not be committed.
+`DOG_ALERT_COOLDOWN_SECONDS` applies the live-stream alert cooldown. By default, `YORKIE_STREAM_KEEP_FRAMES=0`, `YORKIE_STREAM_SAVE_DEBUG_FRAMES=0`, and `SAVE_DEBUG_FRAMES=false` delete each sampled stream JPG after it has been scanned, including frames that produced an alert once the annotated evidence image has been created. Set debug values to `1`/`true` only for local debugging. Startup, periodic stream-loop, and bounded-test cleanup remove old `data/stream_frames/`, `data/debug_crops/`, and `data/evidence/` images by the configured retention/count limits. Cleanup is limited to project `data/` image directories, and generated camera frames/crops/evidence must not be committed.
 
 You can also use the installed console script:
 

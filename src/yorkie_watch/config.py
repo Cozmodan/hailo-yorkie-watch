@@ -104,6 +104,20 @@ class StreamConfig:
     python_executable: str
 
 
+@dataclass(frozen=True)
+class DogAlertConfig:
+    """Runtime settings for dog alert filtering and evidence images."""
+
+    min_confidence: float
+    cooldown_seconds: float
+    confirmation_frames: int
+    min_box_area_ratio: float
+    save_debug_frames: bool
+    evidence_dir: str
+    image_retention_seconds: float
+    max_evidence_images: int
+
+
 def load_environment(env_path: str | Path | None = None) -> None:
     """Load environment variables from `.env` without overriding existing values."""
     loaded = load_dotenv(dotenv_path=env_path, override=False)
@@ -230,9 +244,10 @@ def load_openclaw_config() -> OpenClawConfig:
 def load_detector_config() -> DetectorConfig:
     """Load object detector settings from `.env` / process environment."""
     load_environment()
+    dog_min_confidence = get_float_env("DOG_MIN_CONFIDENCE", 0.45)
     full_frame_dog_confidence = get_float_env(
         "YORKIE_FULL_FRAME_DOG_CONFIDENCE",
-        get_float_env("YORKIE_DOG_CONFIDENCE", 0.35),
+        get_float_env("YORKIE_DOG_CONFIDENCE", dog_min_confidence),
     )
     return DetectorConfig(
         enabled=get_bool_env("YORKIE_DETECTOR_ENABLED", False),
@@ -251,18 +266,19 @@ def load_detector_config() -> DetectorConfig:
 def load_scan_config() -> ScanConfig:
     """Load multi-stage scanner settings from `.env` / process environment."""
     load_environment()
+    dog_min_confidence = get_float_env("DOG_MIN_CONFIDENCE", 0.45)
     return ScanConfig(
         night_mode=(get_env("YORKIE_NIGHT_MODE", "auto") or "auto").lower(),
         scan_tiles=(get_env("YORKIE_SCAN_TILES", "2x2") or "2x2").lower(),
         enable_crop_scan=get_bool_env("YORKIE_ENABLE_CROP_SCAN", True),
         enable_person_roi_scan=get_bool_env("YORKIE_ENABLE_PERSON_ROI_SCAN", True),
-        full_frame_dog_confidence=get_float_env("YORKIE_FULL_FRAME_DOG_CONFIDENCE", 0.35),
-        crop_dog_confidence=get_float_env("YORKIE_CROP_DOG_CONFIDENCE", 0.20),
+        full_frame_dog_confidence=get_float_env("YORKIE_FULL_FRAME_DOG_CONFIDENCE", dog_min_confidence),
+        crop_dog_confidence=get_float_env("YORKIE_CROP_DOG_CONFIDENCE", dog_min_confidence),
         person_confidence=get_float_env("YORKIE_PERSON_CONFIDENCE", 0.35),
-        confirm_frames=max(1, get_int_env("YORKIE_CONFIRM_FRAMES", 2)),
+        confirm_frames=max(1, get_int_env("YORKIE_CONFIRM_FRAMES", get_int_env("DOG_CONFIRMATION_FRAMES", 2))),
         confirm_interval_seconds=max(0.0, get_float_env("YORKIE_CONFIRM_INTERVAL_SECONDS", 1.0)),
         max_crops_per_image=max(0, get_int_env("YORKIE_MAX_CROPS_PER_IMAGE", 8)),
-        save_debug_crops=get_bool_env("YORKIE_SAVE_DEBUG_CROPS", True),
+        save_debug_crops=get_bool_env("YORKIE_SAVE_DEBUG_CROPS", get_bool_env("SAVE_DEBUG_FRAMES", False)),
     )
 
 
@@ -297,7 +313,7 @@ def load_stream_config() -> StreamConfig:
         reconnect_seconds=max(0.0, get_float_env("YORKIE_STREAM_RECONNECT_SECONDS", 5.0)),
         max_failures=max(0, get_int_env("YORKIE_STREAM_MAX_FAILURES", 0)),
         keep_frames=get_bool_env("YORKIE_STREAM_KEEP_FRAMES", False),
-        save_debug_frames=get_bool_env("YORKIE_STREAM_SAVE_DEBUG_FRAMES", False),
+        save_debug_frames=get_bool_env("YORKIE_STREAM_SAVE_DEBUG_FRAMES", get_bool_env("SAVE_DEBUG_FRAMES", False)),
         debug_dir=get_env("YORKIE_STREAM_DEBUG_DIR", "data/stream_frames") or "data/stream_frames",
         retention_minutes=max(0.0, get_float_env("YORKIE_STREAM_RETENTION_MINUTES", 60.0)),
         max_frame_files=max(0, get_int_env("YORKIE_STREAM_MAX_FRAME_FILES", 500)),
@@ -305,4 +321,19 @@ def load_stream_config() -> StreamConfig:
         debug_crop_max_files=max(0, get_int_env("YORKIE_DEBUG_CROP_MAX_FILES", 500)),
         alert_cooldown_seconds=max(0.0, get_float_env("YORKIE_STREAM_ALERT_COOLDOWN_SECONDS", 300.0)),
         python_executable=get_env("YORKIE_STREAM_PYTHON", "python3") or "python3",
+    )
+
+
+def load_dog_alert_config() -> DogAlertConfig:
+    """Load dog alert filtering and evidence image settings."""
+    load_environment()
+    return DogAlertConfig(
+        min_confidence=max(0.0, get_float_env("DOG_MIN_CONFIDENCE", 0.45)),
+        cooldown_seconds=max(0.0, get_float_env("DOG_ALERT_COOLDOWN_SECONDS", 180.0)),
+        confirmation_frames=max(1, get_int_env("DOG_CONFIRMATION_FRAMES", 2)),
+        min_box_area_ratio=max(0.0, get_float_env("DOG_MIN_BOX_AREA_RATIO", 0.01)),
+        save_debug_frames=get_bool_env("SAVE_DEBUG_FRAMES", False),
+        evidence_dir=get_env("DOG_EVIDENCE_DIR", "data/evidence") or "data/evidence",
+        image_retention_seconds=max(0.0, get_float_env("IMAGE_RETENTION_SECONDS", 3600.0)),
+        max_evidence_images=max(0, get_int_env("MAX_EVIDENCE_IMAGES", 100)),
     )
