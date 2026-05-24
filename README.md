@@ -73,6 +73,10 @@ OPENCLAW_VISION_TOOL_PORT=8021
 OPENCLAW_VISION_TOOL_SHARED_SECRET=replace-with-local-secret
 OPENCLAW_VISION_DEFAULT_PROMPT=Describe what you can see. Mention whether a dog or Yorkie is visible and include uncertainty.
 
+YORKIE_VISION_BASE_URL=http://<pi-address-or-tailscale-ip>:8021
+YORKIE_VISION_SHARED_SECRET=<local-secret>
+YORKIE_VISION_TIMEOUT_SECONDS=180
+
 YORKIE_DETECTOR_ENABLED=0
 YORKIE_DETECTOR_BACKEND=hailo_apps
 YORKIE_HAILO_HEF=/usr/share/hailo-models/yolov8m_h10.hef
@@ -184,6 +188,30 @@ Example local-only request shape:
 {
   "prompt": "What can you see?"
 }
+```
+
+OpenClaw-side agent/tool integration can call the Yorkie Watch vision tool through the adapter in `yorkie_watch.openclaw_vision_tools`. Configure these values in OpenClaw's local environment, using placeholders in committed examples only:
+
+```dotenv
+YORKIE_VISION_BASE_URL=http://<pi-address-or-tailscale-ip>:8021
+YORKIE_VISION_SHARED_SECRET=<local-secret>
+YORKIE_VISION_TIMEOUT_SECONDS=180
+```
+
+The adapter exposes two tool calls:
+
+- `camera_snapshot`: posts to `/vision/camera-snapshot` for current camera questions like "What do you see?", "Can you check the camera?", or "Is the Yorkie there?"
+- `latest_alert`: posts to `/vision/latest-alert` for alert-review questions like "Was the last alert real?", "false trigger?", or "previous dog detection?"
+
+Both calls send `Content-Type: application/json`, include `X-OpenClaw-Secret` only when configured, return the Pi JSON result to the agent, and never log the shared secret. OpenClaw should format WhatsApp replies from the returned `description`; if `ok=false`, reply with a short friendly failure note instead of raw JSON unless debug mode is explicitly enabled.
+
+Manual tests from this repo:
+
+```bash
+python scripts/openclaw_yorkie_vision.py test-camera
+python scripts/openclaw_yorkie_vision.py test-latest-alert
+python scripts/openclaw_yorkie_vision.py route --message "What do you see?"
+python scripts/openclaw_yorkie_vision.py route --message "Was the last alert real?"
 ```
 
 Optional manual legacy mode: OpenClaw inbound WhatsApp replies can still be bridged directly into Yorkie Watch with a small local HTTP server, but this is not the primary architecture now that OpenClaw owns chat:

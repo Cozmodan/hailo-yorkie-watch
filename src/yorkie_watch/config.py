@@ -130,6 +130,15 @@ class VLMConfig:
     prompt: str
 
 
+@dataclass(frozen=True)
+class YorkieVisionConfig:
+    """OpenClaw-side settings for calling the Yorkie Watch vision tool."""
+
+    base_url: str
+    shared_secret: str
+    timeout_seconds: float
+
+
 def load_environment(env_path: str | Path | None = None) -> None:
     """Load environment variables from `.env` without overriding existing values."""
     loaded = load_dotenv(dotenv_path=env_path, override=False)
@@ -377,4 +386,20 @@ def load_vlm_config() -> VLMConfig:
             "Look at this image. Is there a dog or Yorkie? Briefly describe what you see and mention uncertainty.",
         )
         or "Look at this image. Is there a dog or Yorkie? Briefly describe what you see and mention uncertainty.",
+    )
+
+
+def load_yorkie_vision_config() -> YorkieVisionConfig:
+    """Load OpenClaw-side Yorkie Watch vision tool settings."""
+    load_environment()
+    timeout_seconds = get_float_env("YORKIE_VISION_TIMEOUT_SECONDS", 180.0)
+    if timeout_seconds <= 0:
+        message = "YORKIE_VISION_TIMEOUT_SECONDS must be greater than zero."
+        LOGGER.error(message)
+        raise ConfigError(message)
+
+    return YorkieVisionConfig(
+        base_url=get_env("YORKIE_VISION_BASE_URL", required=True).rstrip("/"),
+        shared_secret=get_env("YORKIE_VISION_SHARED_SECRET"),
+        timeout_seconds=timeout_seconds,
     )
