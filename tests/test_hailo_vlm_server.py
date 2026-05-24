@@ -4,6 +4,7 @@ import base64
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -79,6 +80,21 @@ class FakeVDevice:
 
     def close(self) -> None:
         self.closed = True
+
+
+class FakeLock:
+    events: list[str] = []
+
+    @classmethod
+    def from_env(cls) -> "FakeLock":
+        return cls()
+
+    def __enter__(self) -> "FakeLock":
+        self.events.append("enter")
+        return self
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
+        self.events.append("exit")
 
 
 def encoded_image() -> str:
@@ -230,6 +246,29 @@ class HailoVLMServerTests(unittest.TestCase):
         self.assertEqual(len(loaded_vlms), 1)
         self.assertTrue(loaded_vlms[0].closed)
         self.assertTrue(loaded_vdevices[0].closed)
+
+    def test_runtime_manager_uses_hailo_device_lock_around_generation(self) -> None:
+        FakeLock.events = []
+
+        def load_runtime(config: server.ServerConfig) -> server.HailoVLMRuntime:
+            return server.HailoVLMRuntime(
+                config=config,
+                vdevice=FakeVDevice(),
+                vlm=FakeVLM("Locked answer"),
+                cv2_module=FakeCV2(),
+                numpy_module=FakeNumpy(),
+            )
+
+        manager = server.HailoVLMRuntimeManager(
+            config=server_config(unload_after_request=True),
+            runtime_loader=load_runtime,
+        )
+        request = server.parse_generate_payload({"prompt": "Describe.", "images": [encoded_image()]})
+
+        with patch("scripts.hailo_vlm_server.HailoDeviceLock", FakeLock):
+            self.assertEqual(manager.generate(request), "Locked answer")
+
+        self.assertEqual(FakeLock.events, ["enter", "exit"])
 
     def test_permanent_mode_reuses_loaded_runtime_until_closed(self) -> None:
         vlm = FakeVLM("Permanent answer")

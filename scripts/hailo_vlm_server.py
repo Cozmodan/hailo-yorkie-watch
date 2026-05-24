@@ -7,11 +7,17 @@ import json
 import logging
 import os
 import re
+import sys
 import threading
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+from yorkie_watch.hailo_lock import HailoDeviceLock, HailoDeviceLockError  # noqa: E402
 
 LOGGER = logging.getLogger("hailo_vlm_server")
 DEFAULT_HEF = "/usr/local/hailo/resources/models/hailo10h/Qwen2-VL-2B-Instruct.hef"
@@ -120,13 +126,13 @@ class HailoVLMRuntimeManager:
     def generate(self, request: VLMRequest) -> str:
         if self.config.unload_after_request:
             return self._generate_with_temporary_runtime(request)
-        runtime = self._runtime
-        if runtime is None:
-            with self._lock:
-                if self._runtime is None:
-                    self._runtime = self._load_runtime()
+        with self._lock:
+            with HailoDeviceLock.from_env():
                 runtime = self._runtime
-        return runtime.generate(request)
+                if runtime is None:
+                    self._runtime = self._load_runtime()
+                    runtime = self._runtime
+                return runtime.generate(request)
 
     def close(self) -> None:
         runtime = self._runtime
@@ -136,13 +142,17 @@ class HailoVLMRuntimeManager:
 
     def _generate_with_temporary_runtime(self, request: VLMRequest) -> str:
         with self._lock:
-            runtime = self._load_runtime()
-            self._runtime = runtime
             try:
-                return runtime.generate(request)
-            finally:
-                self._runtime = None
-                runtime.close()
+                with HailoDeviceLock.from_env():
+                    runtime = self._load_runtime()
+                    self._runtime = runtime
+                    try:
+                        return runtime.generate(request)
+                    finally:
+                        self._runtime = None
+                        runtime.close()
+            except HailoDeviceLockError:
+                raise
 
     def _load_runtime(self) -> HailoVLMRuntime:
         return self._runtime_loader(self.config)
@@ -219,7 +229,8 @@ def build_runtime_manager(config: ServerConfig) -> HailoVLMRuntimeManager:
             "Hailo VLM unload-after-request mode enabled; the model will load only during requests."
         )
         return HailoVLMRuntimeManager(config=config)
-    return HailoVLMRuntimeManager(config=config, runtime=load_hailo_runtime(config))
+    with HailoDeviceLock.from_env():
+        return HailoVLMRuntimeManager(config=config, runtime=load_hailo_runtime(config))
 
 
 def close_resource(resource: object) -> None:
@@ -447,7 +458,7 @@ class HailoVLMHandler(BaseHTTPRequestHandler):
     server_version = "HailoVLMServer/0.1"
 
     @property
-    def runtime(self) -> HailoVLMRuntime:
+    def runtime(self) -> HailoVLMRuntimeManager:
         return self.server.runtime  # type: ignore[attr-defined, no-any-return]
 
     def do_GET(self) -> None:

@@ -16,7 +16,7 @@ class OpenClawClientTests(unittest.TestCase):
             notify_mode="ssh",
             ssh_host="openclaw-host-placeholder",
             ssh_user="openclaw-user-placeholder",
-            whatsapp_target="+1 234-567-8900",
+            whatsapp_target="<whatsapp-target-placeholder>",
             ssh_media_remote_dir="/tmp/yorkie-watch",
             ssh_media_command_template=(
                 "{binary} message send --channel {channel} --account {account} "
@@ -40,7 +40,7 @@ class OpenClawClientTests(unittest.TestCase):
             remote_media_path="/tmp/yorkie-watch/snapshot 1.jpg",
         )
 
-        self.assertIn("--target '+1 234-567-8900'", command)
+        self.assertIn("--target '<whatsapp-target-placeholder>'", command)
         self.assertIn("--message 'Dog detected near gate'", command)
         self.assertIn("--media '/tmp/yorkie-watch/snapshot 1.jpg'", command)
 
@@ -48,10 +48,10 @@ class OpenClawClientTests(unittest.TestCase):
         client = self.make_client()
 
         output = client._redact_ssh_output(
-            "failed for +12345678900 on openclaw-host-placeholder as openclaw-user-placeholder"
+            "failed for <whatsapp-target-placeholder> on openclaw-host-placeholder as openclaw-user-placeholder"
         )
 
-        self.assertNotIn("+12345678900", output)
+        self.assertNotIn("<whatsapp-target-placeholder>", output)
         self.assertNotIn("openclaw-host-placeholder", output)
         self.assertNotIn("openclaw-user-placeholder", output)
 

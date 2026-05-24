@@ -40,7 +40,7 @@ class HomeAssistantClientTests(unittest.TestCase):
         self.client = HomeAssistantClient(
             base_url="http://example.test:8123",
             token="test-token",
-            camera_entity="camera.example",
+            camera_entity="camera.placeholder",
         )
 
     def test_retries_after_transient_http_500_and_uses_cache_buster(self) -> None:

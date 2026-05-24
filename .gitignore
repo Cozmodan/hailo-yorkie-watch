@@ -20,6 +20,7 @@ venv/
 data/snapshots/*
 data/stream_frames/*
 data/vlm_tmp/*
+data/vision_tool/*
 data/latest_event.json
 *.jpg
 *.jpeg

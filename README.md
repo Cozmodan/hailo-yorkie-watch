@@ -1,6 +1,6 @@
 ﻿# Hailo Yorkie Watch
 
-Hailo Yorkie Watch is a Raspberry Pi 5 + Raspberry Pi AI HAT+ 2 / Hailo-10H vision project designed to pull camera snapshots from Home Assistant and send future detection events to OpenClaw for WhatsApp alerts.
+Hailo Yorkie Watch is a Raspberry Pi 5 + Raspberry Pi AI HAT+ 2 / Hailo-10H vision subsystem for OpenClaw. It watches the camera, saves dog/event evidence, and exposes local JSON vision tools so OpenClaw can ask visual questions while keeping its own local LLM as the chat brain.
 
 This first milestone implements plumbing plus an optional dog-detection stage:
 
@@ -9,10 +9,11 @@ This first milestone implements plumbing plus an optional dog-detection stage:
 - Optionally sample frames from a configured live camera stream.
 - Optionally run a Hailo Apps object detector against the saved snapshot.
 - Optionally ask a local Ollama-compatible VLM for a short explanation of alert evidence.
+- Expose a local OpenClaw vision tool API that returns JSON descriptions only.
 - Send a WhatsApp notification through OpenClaw only when the configured detection condition matches.
 - Provide a small command-line entry point.
 
-Yorkie breed recognition is intentionally not implemented yet. For now, a matching `dog` object is treated as the alert condition, and optional VLM text is only a secondary explanation.
+Yorkie breed recognition is intentionally not implemented yet. For now, a matching `dog` object is treated as the alert condition. OpenClaw remains responsible for user-facing chat; Yorkie Watch provides camera/event state and VLM descriptions.
 
 ## Repository safety
 
@@ -67,6 +68,11 @@ OPENCLAW_INBOUND_PORT=8020
 OPENCLAW_INBOUND_SHARED_SECRET=
 OPENCLAW_ALLOWED_SENDERS=
 
+OPENCLAW_VISION_TOOL_HOST=127.0.0.1
+OPENCLAW_VISION_TOOL_PORT=8021
+OPENCLAW_VISION_TOOL_SHARED_SECRET=
+OPENCLAW_VISION_DEFAULT_PROMPT=Describe what you can see. Mention whether a dog or Yorkie is visible and include uncertainty.
+
 YORKIE_DETECTOR_ENABLED=0
 YORKIE_DETECTOR_BACKEND=hailo_apps
 YORKIE_HAILO_HEF=/usr/share/hailo-models/yolov8m_h10.hef
@@ -102,6 +108,7 @@ HAILO_VLM_MAX_TOKENS=80
 HAILO_VLM_OPTIMIZE_MEMORY=1
 HAILO_VLM_CLEAR_CONTEXT=1
 HAILO_VLM_UNLOAD_AFTER_REQUEST=1
+HAILO_DEVICE_LOCK_TIMEOUT_SECONDS=120
 
 YORKIE_NIGHT_MODE=auto
 YORKIE_SCAN_TILES=2x2
@@ -155,7 +162,30 @@ Do not put real values in committed files. Keep real URLs, hostnames, tokens, ca
 
 Snapshot attachments over SSH are opt-in because OpenClaw media CLI syntax must be verified on the Nano first. When `OPENCLAW_SSH_MEDIA_COMMAND_TEMPLATE` is set, the Pi copies the snapshot to `OPENCLAW_SSH_MEDIA_REMOTE_DIR` with `scp`, then runs the configured OpenClaw media command on the Nano. Available template placeholders are `{binary}`, `{channel}`, `{account}`, `{target}`, `{message}`, and `{media_path}`. Leave the template empty until the media command syntax is confirmed.
 
-OpenClaw inbound WhatsApp replies can be bridged back into Yorkie Watch with a small local HTTP server:
+OpenClaw should treat Yorkie Watch as a local vision tool, not as the chat brain. Run the JSON-only vision tool API when OpenClaw needs to ask the Pi what it can see:
+
+```powershell
+python scripts/openclaw_vision_tool_server.py
+```
+
+The vision tool listens on `OPENCLAW_VISION_TOOL_HOST:OPENCLAW_VISION_TOOL_PORT`, defaulting to `127.0.0.1:8021`, and exposes:
+
+- `GET /health`: returns a JSON health response.
+- `POST /vision/latest-alert`: reads `data/latest_event.json`, describes the latest persistent alert evidence image with the local VLM, and returns JSON only.
+- `POST /vision/camera-snapshot`: fetches a fresh Home Assistant snapshot, saves it under `data/vision_tool/`, describes it with the local VLM, and returns JSON only.
+- `POST /vision/describe-image`: accepts `{"prompt": "...", "image_base64": "<base64 jpg/png>"}`, saves the image under `data/vision_tool/`, describes it with the local VLM, and returns JSON only.
+
+Set `OPENCLAW_VISION_TOOL_SHARED_SECRET` locally if OpenClaw should include an `X-OpenClaw-Secret` header. The endpoint never sends WhatsApp messages; it only returns JSON for OpenClaw to use in its own local LLM/chat flow.
+
+Example local-only request shape:
+
+```json
+{
+  "prompt": "What can you see?"
+}
+```
+
+Optional manual legacy mode: OpenClaw inbound WhatsApp replies can still be bridged directly into Yorkie Watch with a small local HTTP server, but this is not the primary architecture now that OpenClaw owns chat:
 
 ```powershell
 python scripts/openclaw_inbound_bridge.py
@@ -175,7 +205,7 @@ Supported WhatsApp commands are:
 - `pause alerts`: writes a local pause flag under `data/runtime/`.
 - `resume alerts`: removes the local pause flag.
 
-Unknown commands receive a short help response with the supported command list. The bridge does not require or store real phone numbers, hostnames, tokens, camera names, OpenClaw URLs, WhatsApp targets, or security details in committed files.
+Unknown commands receive a short help response with the supported command list. This bridge is useful for manual testing, but production chat should prefer OpenClaw calling `scripts/openclaw_vision_tool_server.py` as a local tool. Neither server requires or stores real phone numbers, hostnames, tokens, camera names, OpenClaw URLs, WhatsApp targets, or security details in committed files.
 
 `YORKIE_DETECTOR_ENABLED` defaults to `0`, so `--once` still only saves a Home Assistant snapshot unless you opt in to detection. The default detector backend is `hailo_apps`, using `/usr/share/hailo-models/yolov8m_h10.hef`, `dog,person` as requested detector classes, and `0.45` as the starting dog confidence threshold.
 
@@ -223,6 +253,7 @@ HAILO_VLM_MAX_TOKENS=80
 HAILO_VLM_OPTIMIZE_MEMORY=1
 HAILO_VLM_CLEAR_CONTEXT=1
 HAILO_VLM_UNLOAD_AFTER_REQUEST=1
+HAILO_DEVICE_LOCK_TIMEOUT_SECONDS=120
 ```
 
 The wrapper serves:
@@ -231,7 +262,9 @@ The wrapper serves:
 - `POST /api/chat`
 - `POST /api/generate`
 
-It accepts Ollama-style base64 image requests, decodes JPEG/PNG images with OpenCV, converts BGR to RGB, resizes to the Hailo VLM input frame shape `336x336x3`, and serializes generation with a process-local lock. By default it clears VLM context before each request.
+It accepts Ollama-style base64 image requests, decodes JPEG/PNG images with OpenCV, converts BGR to RGB, resizes to the Hailo VLM input frame shape `336x336x3`, and serializes generation. By default it clears VLM context before each request.
+
+Yorkie Watch uses a shared cross-process Hailo device lock at `/tmp/yorkie_hailo_device.lock` so YOLO detection and VLM generation do not try to use the one Hailo device at the same time. The Hailo Apps detector acquires the lock before its subprocess runs, and the Hailo VLM wrapper acquires it before loading/running VLM requests. `HAILO_DEVICE_LOCK_TIMEOUT_SECONDS=120` controls how long each side waits.
 
 `HAILO_VLM_UNLOAD_AFTER_REQUEST=1` is the safe default for a single Hailo HAT+ 2. The wrapper loads the Hailo `VDevice` and VLM only while answering `/api/chat` or `/api/generate`, then releases them immediately so the live YOLO detector can use the same physical device afterward. This is slower per VLM question, but lets detector and VLM work sequentially without `HAILO_OUT_OF_PHYSICAL_DEVICES`.
 
@@ -469,9 +502,9 @@ yorkie-watch --once
 yorkie-watch --test-openclaw
 ```
 
-## Systemd watch service
+## Systemd services
 
-Example service file path:
+Example Yorkie Watch service file path:
 
 ```text
 /etc/systemd/system/yorkie-watch.service
@@ -497,13 +530,62 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-Keep the local `.env` file in the working directory so Python loads runtime credentials on the Pi. Do not put Home Assistant, OpenClaw, SSH, or WhatsApp secrets into the public service example.
+Example Hailo VLM wrapper service:
+
+```text
+/etc/systemd/system/hailo-vlm-server.service
+```
+
+```ini
+[Unit]
+Description=Yorkie Watch Hailo VLM Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=<user>
+WorkingDirectory=/home/<user>/hailo-yorkie-watch
+ExecStart=/usr/bin/python3 /home/<user>/hailo-yorkie-watch/scripts/hailo_vlm_server.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Example OpenClaw vision tool service:
+
+```text
+/etc/systemd/system/openclaw-vision-tool.service
+```
+
+```ini
+[Unit]
+Description=OpenClaw Yorkie Watch Vision Tool
+After=network-online.target hailo-vlm-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=<user>
+WorkingDirectory=/home/<user>/hailo-yorkie-watch
+ExecStart=/home/<user>/hailo-yorkie-watch/.venv/bin/python /home/<user>/hailo-yorkie-watch/scripts/openclaw_vision_tool_server.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Keep the local `.env` file in the working directory so Python loads runtime credentials on the Pi. Stop `hailo-ollama.service` while `hailo-vlm-server.service` owns or loads the Hailo VLM. Do not put Home Assistant, OpenClaw, SSH, WhatsApp, camera, or network secrets into public service examples.
 
 ## Current hardware architecture
 
 - Home Assistant Pi receives the external security camera feed.
 - Raspberry Pi 5 with AI HAT+ 2 pulls snapshots/frames from Home Assistant.
-- Hailo object detection is wired as an optional subprocess stage.
-- Optional local VLM reasoning can explain annotated alert evidence and answer latest-alert chat questions.
-- Jetson Nano running OpenClaw sends WhatsApp alerts.
+- Yorkie Watch runs as an always-on background vision subsystem.
+- Hailo object detection is wired as an optional subprocess stage and maintains latest event state.
+- The local Hailo VLM wrapper acts as OpenClaw's eyes through the JSON-only vision tool API.
+- Jetson Nano running OpenClaw owns chat and sends WhatsApp alerts.
 - GitHub remains the source of truth for non-secret project code.

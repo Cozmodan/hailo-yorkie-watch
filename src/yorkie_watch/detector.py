@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import DetectorConfig, load_detector_config
+from .hailo_lock import HailoDeviceLock, HailoDeviceLockError
 
 LOGGER = logging.getLogger(__name__)
 COCO_PERSON_CLASS_ID = 0
@@ -157,13 +158,16 @@ class HailoAppsDetector:
         argv = self._build_command(image)
         LOGGER.info("Running detector backend %s for %s.", self.backend, image)
         try:
-            completed = subprocess.run(
-                argv,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=self.config.timeout_seconds,
-            )
+            with HailoDeviceLock.from_env():
+                completed = subprocess.run(
+                    argv,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.config.timeout_seconds,
+                )
+        except HailoDeviceLockError as exc:
+            raise DetectorError(f"Could not acquire Hailo device lock before detector run: {exc}") from exc
         except FileNotFoundError as exc:
             raise DetectorError(f"Detector executable was not found: {argv[0]}") from exc
         except subprocess.TimeoutExpired as exc:
