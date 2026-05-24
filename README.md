@@ -68,9 +68,9 @@ OPENCLAW_INBOUND_PORT=8020
 OPENCLAW_INBOUND_SHARED_SECRET=
 OPENCLAW_ALLOWED_SENDERS=
 
-OPENCLAW_VISION_TOOL_HOST=127.0.0.1
+OPENCLAW_VISION_TOOL_HOST=0.0.0.0
 OPENCLAW_VISION_TOOL_PORT=8021
-OPENCLAW_VISION_TOOL_SHARED_SECRET=
+OPENCLAW_VISION_TOOL_SHARED_SECRET=replace-with-local-secret
 OPENCLAW_VISION_DEFAULT_PROMPT=Describe what you can see. Mention whether a dog or Yorkie is visible and include uncertainty.
 
 YORKIE_DETECTOR_ENABLED=0
@@ -94,10 +94,10 @@ YORKIE_TARGET_CLASSES=dog,person
 YORKIE_DETECTOR_TIMEOUT=60
 YORKIE_HAILO_DETECT_COMMAND=
 
-YORKIE_VLM_ENABLED=0
+YORKIE_VLM_ENABLED=1
 YORKIE_VLM_BASE_URL=http://127.0.0.1:8010
-YORKIE_VLM_MODEL=<vlm-model-name>
-YORKIE_VLM_TIMEOUT_SECONDS=60
+YORKIE_VLM_MODEL=Qwen2-VL-2B-Instruct
+YORKIE_VLM_TIMEOUT_SECONDS=120
 YORKIE_VLM_MAX_IMAGE_WIDTH=1280
 YORKIE_VLM_PROMPT="Look at this image. Is there a dog or Yorkie? Briefly describe what you see and mention uncertainty."
 
@@ -109,6 +109,7 @@ HAILO_VLM_OPTIMIZE_MEMORY=1
 HAILO_VLM_CLEAR_CONTEXT=1
 HAILO_VLM_UNLOAD_AFTER_REQUEST=1
 HAILO_DEVICE_LOCK_TIMEOUT_SECONDS=120
+YORKIE_TMUX_SESSION=yorkie-watch
 
 YORKIE_NIGHT_MODE=auto
 YORKIE_SCAN_TILES=2x2
@@ -224,15 +225,15 @@ If false alerts continue, raise `DOG_MIN_CONFIDENCE` to `0.50` or `0.55`. If ale
 
 ## Local VLM reasoning
 
-VLM reasoning is optional and disabled by default. It is intended for a local Hailo VLM, Hailo-Ollama style bridge, or Ollama-compatible service that accepts image prompts. Keep the real service URL and model name in local `.env` only.
+VLM reasoning is optional at runtime and is enabled in the full tmux stack workflow. It is intended for the local Hailo VLM wrapper or another Ollama-compatible service that accepts image prompts. Keep real service details in local `.env` only.
 
 Starting placeholder settings:
 
 ```dotenv
-YORKIE_VLM_ENABLED=0
+YORKIE_VLM_ENABLED=1
 YORKIE_VLM_BASE_URL=http://127.0.0.1:8010
-YORKIE_VLM_MODEL=<vlm-model-name>
-YORKIE_VLM_TIMEOUT_SECONDS=60
+YORKIE_VLM_MODEL=Qwen2-VL-2B-Instruct
+YORKIE_VLM_TIMEOUT_SECONDS=120
 YORKIE_VLM_MAX_IMAGE_WIDTH=1280
 YORKIE_VLM_PROMPT="Look at this image. Is there a dog or Yorkie? Briefly describe what you see and mention uncertainty."
 ```
@@ -500,6 +501,48 @@ You can also use the installed console script:
 ```powershell
 yorkie-watch --once
 yorkie-watch --test-openclaw
+```
+
+## Run the full Yorkie Watch/OpenClaw vision stack with tmux
+
+On the Pi, one launcher can run the three long-lived processes in a single tmux session:
+
+- Hailo VLM wrapper on `127.0.0.1:${HAILO_VLM_PORT:-8010}`.
+- OpenClaw vision tool on `OPENCLAW_VISION_TOOL_HOST:OPENCLAW_VISION_TOOL_PORT`.
+- Yorkie Watch background watcher using `--watch` by default.
+
+Use placeholder-only committed examples and keep real Home Assistant, OpenClaw, SSH, WhatsApp, camera, and network values in local `.env`.
+
+```bash
+scripts/yorkie_stack_tmux.sh start
+scripts/yorkie_stack_tmux.sh status
+scripts/yorkie_stack_tmux.sh smoke-test
+scripts/yorkie_stack_tmux.sh attach
+scripts/yorkie_stack_tmux.sh stop
+```
+
+To run the live stream watcher instead of snapshot watch mode:
+
+```bash
+scripts/yorkie_stack_tmux.sh start stream
+```
+
+The default tmux session is `yorkie-watch`; override it locally with `YORKIE_TMUX_SESSION`. Logs are written under `logs/tmux/` and ignored by Git. The launcher leaves a pane open if a process exits so the error remains visible.
+
+The default commands are:
+
+```bash
+HAILO_VLM_UNLOAD_AFTER_REQUEST=1 HAILO_DEVICE_LOCK_TIMEOUT_SECONDS=120 /usr/bin/python3 scripts/hailo_vlm_server.py
+source .venv/bin/activate && PYTHONPATH=src python scripts/openclaw_vision_tool_server.py
+source .venv/bin/activate && PYTHONPATH=src python -m yorkie_watch.main --watch
+```
+
+Override them locally only when needed:
+
+```bash
+YORKIE_STACK_VLM_CMD="<local-vlm-command-placeholder>" scripts/yorkie_stack_tmux.sh restart
+YORKIE_STACK_VISION_CMD="<local-vision-tool-command-placeholder>" scripts/yorkie_stack_tmux.sh restart
+YORKIE_STACK_WATCH_CMD="<local-watch-command-placeholder>" scripts/yorkie_stack_tmux.sh restart
 ```
 
 ## Systemd services

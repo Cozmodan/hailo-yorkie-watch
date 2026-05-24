@@ -22,6 +22,7 @@ data/stream_frames/*
 data/vlm_tmp/*
 data/vision_tool/*
 data/latest_event.json
+logs/tmux/*
 *.jpg
 *.jpeg
 *.png
