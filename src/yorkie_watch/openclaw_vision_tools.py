@@ -150,6 +150,8 @@ def select_vision_route(message: str) -> VisionRoute | None:
         "was the alert real",
         "false trigger",
         "false alarm",
+        "was that a dog",
+        "was that real",
         "previous dog detection",
         "last dog detection",
         "last detection",

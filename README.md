@@ -63,10 +63,11 @@ OPENCLAW_WHATSAPP_ACCOUNT=business
 OPENCLAW_SSH_MEDIA_REMOTE_DIR=/tmp/yorkie-watch
 OPENCLAW_SSH_MEDIA_COMMAND_TEMPLATE=
 
-OPENCLAW_INBOUND_HOST=127.0.0.1
+OPENCLAW_INBOUND_HOST=0.0.0.0
 OPENCLAW_INBOUND_PORT=8020
-OPENCLAW_INBOUND_SHARED_SECRET=
-OPENCLAW_ALLOWED_SENDERS=
+OPENCLAW_INBOUND_SHARED_SECRET=replace-with-local-inbound-secret
+OPENCLAW_ALLOWED_SENDERS=+61000000000
+OPENCLAW_INBOUND_SMOKE_SEND=0
 
 OPENCLAW_VISION_TOOL_HOST=0.0.0.0
 OPENCLAW_VISION_TOOL_PORT=8021
@@ -114,6 +115,7 @@ HAILO_VLM_CLEAR_CONTEXT=1
 HAILO_VLM_UNLOAD_AFTER_REQUEST=1
 HAILO_DEVICE_LOCK_TIMEOUT_SECONDS=120
 YORKIE_TMUX_SESSION=yorkie-watch
+YORKIE_STACK_INBOUND_CMD=
 
 YORKIE_NIGHT_MODE=auto
 YORKIE_SCAN_TILES=2x2
@@ -214,27 +216,38 @@ python scripts/openclaw_yorkie_vision.py route --message "What do you see?"
 python scripts/openclaw_yorkie_vision.py route --message "Was the last alert real?"
 ```
 
-Optional manual legacy mode: OpenClaw inbound WhatsApp replies can still be bridged directly into Yorkie Watch with a small local HTTP server, but this is not the primary architecture now that OpenClaw owns chat:
+OpenClaw inbound WhatsApp messages can be bridged directly into deterministic Yorkie Watch vision routes without using `openclaw agent`:
 
 ```powershell
 python scripts/openclaw_inbound_bridge.py
 ```
 
-The bridge listens on `OPENCLAW_INBOUND_HOST:OPENCLAW_INBOUND_PORT`, defaulting to `127.0.0.1:8020`, and exposes:
+The bridge listens on `OPENCLAW_INBOUND_HOST:OPENCLAW_INBOUND_PORT`, defaulting to `0.0.0.0:8020`, and exposes:
 
 - `GET /health`: returns a JSON health response.
 - `POST /openclaw/inbound`: accepts OpenClaw reply JSON using flexible sender and message fields such as `sender`, `from`, `phone`, `message`, `text`, `body`, and `timestamp`.
 
-Set `OPENCLAW_INBOUND_SHARED_SECRET` locally if OpenClaw should include an `X-OpenClaw-Secret` header. Set `OPENCLAW_ALLOWED_SENDERS` to a comma-separated placeholder list such as `<whatsapp-sender-placeholder>` values when only selected senders should be accepted. Leave both empty for local-only testing.
+Set `OPENCLAW_INBOUND_SHARED_SECRET` locally if OpenClaw should include an `X-OpenClaw-Secret` header. Set `OPENCLAW_ALLOWED_SENDERS` to a comma-separated local sender allow-list when only selected senders should be accepted. The bridge redacts secrets and full sender numbers from logs.
 
 Supported WhatsApp commands are:
 
-- `status`: returns a Yorkie Watch status summary and latest alert metadata when available.
-- `check last alert`, `last alert`, `is that a dog`, or `false trigger`: reuses the existing chat flow against `data/latest_event.json` and sends the VLM answer back through OpenClaw.
+- `status`: returns Yorkie Watch status, a tmux stack hint, and latest alert metadata when available.
+- `what do you see`, `what can you see`, `check camera`, `is the Yorkie there`, or `is the dog there`: calls `/vision/camera-snapshot`, then sends the description back through OpenClaw.
+- `last alert`, `was the last alert real`, `was that a dog`, or `false trigger`: calls `/vision/latest-alert`, then sends the description back through OpenClaw.
 - `pause alerts`: writes a local pause flag under `data/runtime/`.
 - `resume alerts`: removes the local pause flag.
 
-Unknown commands receive a short help response with the supported command list. This bridge is useful for manual testing, but production chat should prefer OpenClaw calling `scripts/openclaw_vision_tool_server.py` as a local tool. Neither server requires or stores real phone numbers, hostnames, tokens, camera names, OpenClaw URLs, WhatsApp targets, or security details in committed files.
+Unknown commands receive a short help response with the supported command list. Neither server requires or stores real phone numbers, hostnames, tokens, camera names, OpenClaw URLs, WhatsApp targets, or security details in committed files.
+
+Placeholder curl test:
+
+```bash
+curl -fsS \
+  -H "Content-Type: application/json" \
+  -H "X-OpenClaw-Secret: <local-inbound-secret>" \
+  -d '{"sender":"<sender-placeholder>","message":"What do you see?"}' \
+  http://<pi-address-or-tailscale-ip>:8020/openclaw/inbound
+```
 
 `YORKIE_DETECTOR_ENABLED` defaults to `0`, so `--once` still only saves a Home Assistant snapshot unless you opt in to detection. The default detector backend is `hailo_apps`, using `/usr/share/hailo-models/yolov8m_h10.hef`, `dog,person` as requested detector classes, and `0.45` as the starting dog confidence threshold.
 
@@ -531,22 +544,23 @@ yorkie-watch --once
 yorkie-watch --test-openclaw
 ```
 
-## Run the full Yorkie Watch/OpenClaw vision stack with tmux
+## Run the full Yorkie Watch/OpenClaw bridge stack with tmux
 
-On the Pi, one launcher can run the three long-lived processes in a single tmux session:
+On the Pi, one launcher can run the four long-lived processes in a single tmux session:
 
 - Hailo VLM wrapper on `127.0.0.1:${HAILO_VLM_PORT:-8010}`.
 - OpenClaw vision tool on `OPENCLAW_VISION_TOOL_HOST:OPENCLAW_VISION_TOOL_PORT`.
+- OpenClaw inbound bridge on `OPENCLAW_INBOUND_HOST:OPENCLAW_INBOUND_PORT`.
 - Yorkie Watch background watcher using `--watch` by default.
 
 Use placeholder-only committed examples and keep real Home Assistant, OpenClaw, SSH, WhatsApp, camera, and network values in local `.env`.
 
 ```bash
-scripts/yorkie_stack_tmux.sh start
-scripts/yorkie_stack_tmux.sh status
-scripts/yorkie_stack_tmux.sh smoke-test
-scripts/yorkie_stack_tmux.sh attach
-scripts/yorkie_stack_tmux.sh stop
+./scripts/yorkie_stack_tmux.sh restart
+./scripts/yorkie_stack_tmux.sh status
+./scripts/yorkie_stack_tmux.sh smoke-test
+./scripts/yorkie_stack_tmux.sh attach
+./scripts/yorkie_stack_tmux.sh stop
 ```
 
 To run the live stream watcher instead of snapshot watch mode:
@@ -562,6 +576,7 @@ The default commands are:
 ```bash
 HAILO_VLM_UNLOAD_AFTER_REQUEST=1 HAILO_DEVICE_LOCK_TIMEOUT_SECONDS=120 /usr/bin/python3 scripts/hailo_vlm_server.py
 source .venv/bin/activate && PYTHONPATH=src python scripts/openclaw_vision_tool_server.py
+source .venv/bin/activate && PYTHONPATH=src python scripts/openclaw_inbound_bridge.py
 source .venv/bin/activate && PYTHONPATH=src python -m yorkie_watch.main --watch
 ```
 
@@ -570,6 +585,7 @@ Override them locally only when needed:
 ```bash
 YORKIE_STACK_VLM_CMD="<local-vlm-command-placeholder>" scripts/yorkie_stack_tmux.sh restart
 YORKIE_STACK_VISION_CMD="<local-vision-tool-command-placeholder>" scripts/yorkie_stack_tmux.sh restart
+YORKIE_STACK_INBOUND_CMD="<local-inbound-bridge-command-placeholder>" scripts/yorkie_stack_tmux.sh restart
 YORKIE_STACK_WATCH_CMD="<local-watch-command-placeholder>" scripts/yorkie_stack_tmux.sh restart
 ```
 

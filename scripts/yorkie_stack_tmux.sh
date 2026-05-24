@@ -8,6 +8,7 @@ DEFAULT_SESSION="yorkie-watch"
 
 DEFAULT_VLM_CMD="HAILO_VLM_UNLOAD_AFTER_REQUEST=1 HAILO_DEVICE_LOCK_TIMEOUT_SECONDS=120 /usr/bin/python3 scripts/hailo_vlm_server.py"
 DEFAULT_VISION_CMD="source .venv/bin/activate && PYTHONPATH=src python scripts/openclaw_vision_tool_server.py"
+DEFAULT_INBOUND_CMD="source .venv/bin/activate && PYTHONPATH=src python scripts/openclaw_inbound_bridge.py"
 DEFAULT_WATCH_CMD="source .venv/bin/activate && PYTHONPATH=src python -m yorkie_watch.main --watch"
 DEFAULT_STREAM_WATCH_CMD="source .venv/bin/activate && PYTHONPATH=src python -m yorkie_watch.main --watch-stream"
 
@@ -26,6 +27,7 @@ Environment overrides:
   YORKIE_TMUX_SESSION
   YORKIE_STACK_VLM_CMD
   YORKIE_STACK_VISION_CMD
+  YORKIE_STACK_INBOUND_CMD
   YORKIE_STACK_WATCH_CMD
 EOF
 }
@@ -98,6 +100,7 @@ require_files() {
     local required=(
         "scripts/hailo_vlm_server.py"
         "scripts/openclaw_vision_tool_server.py"
+        "scripts/openclaw_inbound_bridge.py"
         "src/yorkie_watch/main.py"
     )
 
@@ -188,7 +191,7 @@ normalize_mode() {
 start_stack() {
     local mode="$1"
     local session="$2"
-    local vlm_cmd vision_cmd watch_cmd
+    local vlm_cmd vision_cmd inbound_cmd watch_cmd
 
     require_tmux
     require_files
@@ -201,10 +204,12 @@ start_stack() {
     mkdir -p "${LOG_DIR}"
     vlm_cmd="$(dotenv_get YORKIE_STACK_VLM_CMD "${DEFAULT_VLM_CMD}")"
     vision_cmd="$(dotenv_get YORKIE_STACK_VISION_CMD "${DEFAULT_VISION_CMD}")"
+    inbound_cmd="$(dotenv_get YORKIE_STACK_INBOUND_CMD "${DEFAULT_INBOUND_CMD}")"
     watch_cmd="$(watch_command_for_mode "${mode}")"
 
     new_window "${session}" "hailo-vlm" "${vlm_cmd:-${DEFAULT_VLM_CMD}}"
     new_window "${session}" "vision-tool" "${vision_cmd:-${DEFAULT_VISION_CMD}}"
+    new_window "${session}" "inbound-bridge" "${inbound_cmd:-${DEFAULT_INBOUND_CMD}}"
     new_window "${session}" "yorkie-watch" "${watch_cmd}"
     tmux select-window -t "${session}:hailo-vlm" >/dev/null
 
@@ -251,7 +256,7 @@ health_check() {
 
 status_stack() {
     local session="$1"
-    local hailo_port vision_port rc=0
+    local hailo_port vision_port inbound_port rc=0
     require_tmux
     require_curl
 
@@ -266,14 +271,16 @@ status_stack() {
 
     hailo_port="$(dotenv_get HAILO_VLM_PORT "8010")"
     vision_port="$(dotenv_get OPENCLAW_VISION_TOOL_PORT "8021")"
+    inbound_port="$(dotenv_get OPENCLAW_INBOUND_PORT "8020")"
     health_check "hailo-vlm" "http://127.0.0.1:${hailo_port}/health" || rc=1
     health_check "vision-tool" "http://127.0.0.1:${vision_port}/health" || rc=1
+    health_check "inbound-bridge" "http://127.0.0.1:${inbound_port}/health" || rc=1
     return "${rc}"
 }
 
 show_logs() {
     local name log_file
-    for name in hailo-vlm vision-tool yorkie-watch; do
+    for name in hailo-vlm vision-tool inbound-bridge yorkie-watch; do
         log_file="${LOG_DIR}/${name}.log"
         echo
         echo "==> ${log_file}"
@@ -286,14 +293,19 @@ show_logs() {
 }
 
 smoke_test() {
-    local hailo_port vision_port vision_url secret
+    local hailo_port vision_port inbound_port vision_url inbound_url vision_secret inbound_secret smoke_send
     local body='{"prompt":"Describe the camera view briefly. Is a dog or Yorkie visible?"}'
+    local inbound_body='{"sender":"test","message":"status"}'
     require_curl
 
     hailo_port="$(dotenv_get HAILO_VLM_PORT "8010")"
     vision_port="$(dotenv_get OPENCLAW_VISION_TOOL_PORT "8021")"
+    inbound_port="$(dotenv_get OPENCLAW_INBOUND_PORT "8020")"
     vision_url="http://127.0.0.1:${vision_port}"
-    secret="$(dotenv_get OPENCLAW_VISION_TOOL_SHARED_SECRET "")"
+    inbound_url="http://127.0.0.1:${inbound_port}"
+    vision_secret="$(dotenv_get OPENCLAW_VISION_TOOL_SHARED_SECRET "")"
+    inbound_secret="$(dotenv_get OPENCLAW_INBOUND_SHARED_SECRET "")"
+    smoke_send="$(dotenv_get OPENCLAW_INBOUND_SMOKE_SEND "0")"
 
     echo "Checking Hailo VLM health..."
     curl -fsS --connect-timeout 3 --max-time 10 "http://127.0.0.1:${hailo_port}/health"
@@ -301,11 +313,24 @@ smoke_test() {
     echo "Checking OpenClaw vision tool health..."
     curl -fsS --connect-timeout 3 --max-time 10 "${vision_url}/health"
     echo
+    echo "Checking OpenClaw inbound bridge health..."
+    curl -fsS --connect-timeout 3 --max-time 10 "${inbound_url}/health"
+    echo
+    echo "Testing inbound bridge status route..."
+    local inbound_curl_args=(-fsS --connect-timeout 5 --max-time 30 -H "Content-Type: application/json")
+    if [[ -n "${inbound_secret}" ]]; then
+        inbound_curl_args+=(-H "X-OpenClaw-Secret: ${inbound_secret}")
+    fi
+    if [[ "${smoke_send}" != "1" ]]; then
+        inbound_curl_args+=(-H "X-OpenClaw-Smoke-Test: 1")
+    fi
+    curl "${inbound_curl_args[@]}" -d "${inbound_body}" "${inbound_url}/openclaw/inbound"
+    echo
     echo "Requesting camera snapshot description..."
 
     local curl_args=(-fsS --connect-timeout 5 --max-time 180 -H "Content-Type: application/json")
-    if [[ -n "${secret}" ]]; then
-        curl_args+=(-H "X-OpenClaw-Secret: ${secret}")
+    if [[ -n "${vision_secret}" ]]; then
+        curl_args+=(-H "X-OpenClaw-Secret: ${vision_secret}")
     fi
 
     curl "${curl_args[@]}" -d "${body}" "${vision_url}/vision/camera-snapshot"
